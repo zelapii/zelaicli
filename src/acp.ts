@@ -72,6 +72,7 @@ export class AcpAgent {
   private nextId = 1
   private buffer = ""
   private closed = false
+  private queue: Promise<void> = Promise.resolve()
 
   constructor(config: Config) {
     this.config = config
@@ -139,9 +140,11 @@ export class AcpAgent {
       return
     }
     if (message.method) {
-      this.handle(message).catch((error) => {
-        this.fail(message.id, -32603, error instanceof Error ? error.message : String(error))
-      })
+      this.queue = this.queue
+        .then(() => this.handle(message))
+        .catch((error) => {
+          this.fail(message.id, -32603, error instanceof Error ? error.message : String(error))
+        })
     }
   }
 
