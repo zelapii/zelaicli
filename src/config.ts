@@ -11,6 +11,7 @@ export interface Config {
   permission?: import("./permissions").PermissionConfig
   instructions?: string[]
   mcp?: Record<string, import("./mcp").McpServerConfig>
+  formatter?: Record<string, string>
 }
 
 export interface Account {
@@ -33,9 +34,55 @@ export function defaultConfig(): Config {
   }
 }
 
+export function parseJsonc<T = unknown>(raw: string): T {
+  let output = ""
+  let string = false
+  let escape = false
+  let line = false
+  let block = false
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]
+    const next = raw[index + 1]
+    if (line) {
+      if (char === "\n") {
+        line = false
+        output += char
+      }
+      continue
+    }
+    if (block) {
+      if (char === "*" && next === "/") {
+        block = false
+        index += 1
+      }
+      continue
+    }
+    if (string) {
+      output += char
+      if (escape) escape = false
+      else if (char === "\\") escape = true
+      else if (char === '"') string = false
+      continue
+    }
+    if (char === "/" && next === "/") {
+      line = true
+      index += 1
+      continue
+    }
+    if (char === "/" && next === "*") {
+      block = true
+      index += 1
+      continue
+    }
+    if (char === '"') string = true
+    output += char
+  }
+  return JSON.parse(output.replace(/,\s*([}\]])/g, "$1")) as T
+}
+
 async function readJson<T>(file: string): Promise<T | undefined> {
   try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as T
+    return parseJsonc<T>(await fs.readFile(file, "utf8"))
   } catch {
     return undefined
   }
@@ -98,6 +145,7 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
     },
     instructions: [...(base.instructions || []), ...(project.instructions || [])],
     mcp: { ...(base.mcp || {}), ...(project.mcp || {}) },
+    formatter: { ...(base.formatter || {}), ...(project.formatter || {}) },
     apiKey: base.apiKey,
   }
 }

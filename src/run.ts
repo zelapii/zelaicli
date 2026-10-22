@@ -5,6 +5,7 @@ import type { Session } from "./session"
 import { saveSession } from "./session"
 import type { ApprovalRequest } from "./tools"
 import type { McpManager } from "./mcp"
+import type { Skill } from "./skills"
 
 export interface RunOptions {
   config: Config
@@ -18,6 +19,7 @@ export interface RunOptions {
   instructions?: string
   agents?: Agent[]
   mcp?: McpManager
+  skills?: Skill[]
 }
 
 export async function runOnce(options: RunOptions) {
@@ -56,6 +58,8 @@ export async function runOnce(options: RunOptions) {
       agents: options.agents,
       instructions: options.instructions,
       mcp: options.mcp,
+      skills: options.skills,
+      formatter: config.formatter,
       onEvent: (event) => {
         if (event.type === "text") {
           wrote = true

@@ -3,6 +3,8 @@ import { AGENTS, agentContext, findAgent, type Agent } from "./agents"
 import { executeTool, toolDefinitions, type Approve } from "./tools"
 import { createSession, type Session, type Todo } from "./session"
 import type { McpManager } from "./mcp"
+import { mergePermission } from "./permissions"
+import { skillSummary, type Skill } from "./skills"
 
 export type EngineEvent =
   | { type: "text"; text: string }
@@ -33,6 +35,16 @@ export interface RunTurnOptions {
   runSubagent?: (agent: string, prompt: string) => Promise<string>
   subagents?: boolean
   mcp?: McpManager
+  skills?: Skill[]
+  formatter?: Record<string, string>
+  askQuestion?: (request: QuestionRequest) => Promise<string>
+}
+
+export interface QuestionRequest {
+  header?: string
+  question: string
+  options?: { label: string; description?: string }[]
+  multiple?: boolean
 }
 
 function toApiMessages(system: string, messages: ChatMessage[]): ChatMessage[] {
@@ -48,8 +60,15 @@ function parseArguments(raw: string) {
 }
 
 export async function runTurn(options: RunTurnOptions) {
-  const maxSteps = options.maxSteps ?? 16
-  const system = agentContext(options.agent, options.cwd, options.instructions || "", options.session.summary || "")
+  const maxSteps = options.agent.steps ?? options.maxSteps ?? 16
+  const permission = mergePermission(options.permission, options.agent.permission)
+  const system = agentContext(
+    options.agent,
+    options.cwd,
+    options.instructions || "",
+    options.session.summary || "",
+    skillSummary(options.skills || []),
+  )
   const runSubagent =
     options.subagents === false
       ? undefined
@@ -63,6 +82,7 @@ export async function runTurn(options: RunTurnOptions) {
             ...options,
             session: nested,
             agent: sub,
+            model: sub.model || options.model,
             subagents: false,
             maxSteps: 10,
             onEvent: (event) => {
@@ -83,6 +103,8 @@ export async function runTurn(options: RunTurnOptions) {
       baseUrl: options.baseUrl,
       apiKey: options.apiKey,
       model: options.model,
+      temperature: options.agent.temperature,
+      top_p: options.agent.topP,
       messages: toApiMessages(system, options.session.messages),
       tools,
       signal: options.signal,
@@ -112,17 +134,39 @@ export async function runTurn(options: RunTurnOptions) {
         options.session.todos = todos
         options.onEvent({ type: "todos", todos })
         outcome = { ok: true, output: `Updated ${todos.length} todo${todos.length === 1 ? "" : "s"}` }
+      } else if (name === "question") {
+        const parsed = parseArguments(args)
+        if (!options.askQuestion) {
+          outcome = { ok: false, output: "No interactive user is available for the question tool." }
+        } else {
+          const choices = Array.isArray(parsed.options)
+            ? parsed.options.map((option: any) =>
+                typeof option === "string"
+                  ? { label: option }
+                  : { label: String(option?.label || ""), ...(option?.description ? { description: String(option.description) } : {}) },
+              )
+            : []
+          const answer = await options.askQuestion({
+            header: parsed.header ? String(parsed.header) : undefined,
+            question: String(parsed.question || ""),
+            options: choices,
+            multiple: Boolean(parsed.multiple),
+          })
+          outcome = { ok: true, output: answer || "(no answer)" }
+        }
       } else {
         outcome = await executeTool(name, args, {
           cwd: options.cwd,
           sessionId: options.session.id,
           approve: options.approve,
-          permission: options.permission,
+          permission,
           always: options.always,
           autoApprove: options.autoApprove,
           signal: options.signal,
           runSubagent,
           callMcp: options.mcp ? (name, args) => options.mcp!.call(name, args) : undefined,
+          skills: options.skills,
+          formatter: options.formatter,
         })
       }
       const toolMessage: ChatMessage = {

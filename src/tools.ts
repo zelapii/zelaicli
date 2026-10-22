@@ -5,9 +5,12 @@ import type { Agent } from "./agents"
 import { decisionFor, type PermissionConfig } from "./permissions"
 import { recordSnapshot } from "./undo"
 import type { Todo } from "./session"
+import type { Skill } from "./skills"
+import { loadIgnore } from "./ignore"
+import { runFormatter } from "./formatters"
 
 export interface ApprovalRequest {
-  kind: "write" | "edit" | "bash" | "task" | "mcp"
+  kind: "write" | "edit" | "bash" | "task" | "mcp" | "read" | "glob" | "grep" | "list" | "webfetch" | "websearch" | "skill" | "external_directory"
   title: string
   detail: string
 }
@@ -24,6 +27,8 @@ export interface ToolContext {
   autoApprove?: boolean
   runSubagent?: (agent: string, prompt: string) => Promise<string>
   callMcp?: (name: string, args: unknown) => Promise<{ ok: boolean; output: string }>
+  skills?: Skill[]
+  formatter?: Record<string, string>
   onTodos?: (todos: Todo[]) => void
 }
 
@@ -46,7 +51,7 @@ function resolve(context: ToolContext, file: string) {
 
 async function approved(context: ToolContext, request: ApprovalRequest) {
   if (context.autoApprove) return true
-  const decision = decisionFor(context.permission, request.kind, request.kind === "bash" ? request.detail : request.title)
+  const decision = decisionFor(context.permission, request.kind, request.detail || request.title)
   if (decision === "allow") return true
   if (decision === "deny") return false
   if (context.always?.has(request.kind)) return true
@@ -167,6 +172,96 @@ const listTool: ToolDefinition = {
   },
 }
 
+const webfetchTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "webfetch",
+    description: "Fetch a URL and return its readable text content.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "http or https URL" },
+        max_chars: { type: "number", description: "Maximum characters to return" },
+      },
+      required: ["url"],
+    },
+  },
+}
+
+const websearchTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "websearch",
+    description: "Search the web and return titles, URLs, and snippets.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        num: { type: "number", description: "Number of results, default 8" },
+      },
+      required: ["query"],
+    },
+  },
+}
+
+const applyPatchTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "apply_patch",
+    description: "Apply a unified diff patch inside the project using git apply.",
+    parameters: {
+      type: "object",
+      properties: {
+        patch: { type: "string", description: "Unified diff text" },
+      },
+      required: ["patch"],
+    },
+  },
+}
+
+const skillTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "skill",
+    description: "Load a project or global skill (SKILL.md) by name.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+      },
+      required: ["name"],
+    },
+  },
+}
+
+const questionTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "question",
+    description: "Ask the user a question with optional choices before continuing.",
+    parameters: {
+      type: "object",
+      properties: {
+        header: { type: "string", description: "Short label" },
+        question: { type: "string" },
+        options: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string" },
+              description: { type: "string" },
+            },
+            required: ["label"],
+          },
+        },
+        multiple: { type: "boolean" },
+      },
+      required: ["question"],
+    },
+  },
+}
+
 const todoTool: ToolDefinition = {
   type: "function",
   function: {
@@ -211,17 +306,18 @@ const taskTool: ToolDefinition = {
   },
 }
 
-const READONLY_TOOLS = [readTool, globTool, grepTool, listTool]
-const ALL_TOOLS = [readTool, writeTool, editTool, bashTool, globTool, grepTool, listTool]
+const READONLY_TOOLS = [readTool, globTool, grepTool, listTool, webfetchTool, websearchTool, skillTool]
+const ALL_TOOLS = [readTool, writeTool, editTool, bashTool, globTool, grepTool, listTool, webfetchTool, websearchTool, applyPatchTool, skillTool]
 
 export function toolDefinitions(agent: Agent, mcpTools: ToolDefinition[] = []): ToolDefinition[] {
   let list: ToolDefinition[]
   if (agent.tools === "all") list = [...ALL_TOOLS]
   else if (agent.tools === "readonly") list = [...READONLY_TOOLS]
   else list = ALL_TOOLS.filter((tool) => agent.tools.includes(tool.function.name))
-  if (agent.mode === "primary") list.push(taskTool)
+  if (agent.mode !== "subagent") list.push(taskTool)
   if (agent.tools !== "readonly") list.push(...mcpTools.filter((tool) => !list.some((entry) => entry.function.name === tool.function.name)))
   if (!list.some((tool) => tool.function.name === "todowrite")) list.push(todoTool)
+  if (!list.some((tool) => tool.function.name === "question")) list.push(questionTool)
   return list
 }
 
@@ -240,8 +336,21 @@ async function task(context: ToolContext, args: any): Promise<ToolResult> {
   return { ok: true, output: truncate(output) }
 }
 
+async function ensureAllowed(context: ToolContext, file: string) {
+  const relative = path.relative(context.cwd, file)
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return true
+  if (!relative) return true
+  return approved(context, {
+    kind: "external_directory",
+    title: "Access outside the project",
+    detail: file,
+  })
+}
+
 async function read(context: ToolContext, args: any): Promise<ToolResult> {
   const file = resolve(context, String(args.path || ""))
+  if (!(await ensureAllowed(context, file))) return { ok: false, output: "Denied by the user." }
+  if (!(await approved(context, { kind: "read", title: "Read file", detail: file }))) return { ok: false, output: "Denied by the user." }
   const content = await fs.readFile(file, "utf8")
   const lines = content.split("\n")
   const offset = Math.max(1, Number(args.offset) || 1)
@@ -257,6 +366,7 @@ async function read(context: ToolContext, args: any): Promise<ToolResult> {
 async function write(context: ToolContext, args: any): Promise<ToolResult> {
   const file = resolve(context, String(args.path || ""))
   const content = String(args.content ?? "")
+  if (!(await ensureAllowed(context, file))) return { ok: false, output: "Denied by the user." }
   const ok = await approved(context, {
     kind: "write",
     title: `Write ${file}`,
@@ -266,8 +376,9 @@ async function write(context: ToolContext, args: any): Promise<ToolResult> {
   const before = await fs.readFile(file, "utf8").catch(() => null)
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.writeFile(file, content)
+  const formatError = await runFormatter(file, context.formatter, context.cwd)
   await recordSnapshot(context.sessionId, file, before)
-  return { ok: true, output: `Wrote ${file} (${content.length} characters)` }
+  return { ok: true, output: `Wrote ${file} (${content.length} characters)${formatError ? `\n${formatError}` : ""}` }
 }
 
 async function edit(context: ToolContext, args: any): Promise<ToolResult> {
@@ -275,6 +386,7 @@ async function edit(context: ToolContext, args: any): Promise<ToolResult> {
   const oldString = String(args.old_string ?? "")
   const newString = String(args.new_string ?? "")
   if (!oldString) return { ok: false, output: "old_string must not be empty" }
+  if (!(await ensureAllowed(context, file))) return { ok: false, output: "Denied by the user." }
   const content = await fs.readFile(file, "utf8")
   const count = content.split(oldString).length - 1
   if (count === 0) return { ok: false, output: `old_string was not found in ${file}` }
@@ -289,8 +401,9 @@ async function edit(context: ToolContext, args: any): Promise<ToolResult> {
   if (!ok) return { ok: false, output: "Denied by the user." }
   const next = args.replace_all ? content.split(oldString).join(newString) : content.replace(oldString, newString)
   await fs.writeFile(file, next)
+  const formatError = await runFormatter(file, context.formatter, context.cwd)
   await recordSnapshot(context.sessionId, file, content)
-  return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})` }
+  return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})${formatError ? `\n${formatError}` : ""}` }
 }
 
 async function bash(context: ToolContext, args: any): Promise<ToolResult> {
@@ -323,10 +436,17 @@ async function bash(context: ToolContext, args: any): Promise<ToolResult> {
 async function glob(context: ToolContext, args: any): Promise<ToolResult> {
   const pattern = String(args.pattern || "")
   const root = resolve(context, String(args.path || "."))
+  if (!(await ensureAllowed(context, root))) return { ok: false, output: "Denied by the user." }
+  if (!(await approved(context, { kind: "glob", title: "Find files", detail: pattern }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const ignored = await loadIgnore(context.cwd)
   const results: string[] = []
   for await (const file of new Bun.Glob(pattern).scan({ cwd: root, onlyFiles: true })) {
     if (file.includes("node_modules/") || file.startsWith(".git/")) continue
-    results.push(path.relative(context.cwd, path.resolve(root, file)) || file)
+    const relative = path.relative(context.cwd, path.resolve(root, file)) || file
+    if (ignored(relative)) continue
+    results.push(relative)
     if (results.length >= 300) break
   }
   return { ok: true, output: results.length ? results.join("\n") : "No files matched." }
@@ -336,6 +456,11 @@ async function grep(context: ToolContext, args: any): Promise<ToolResult> {
   const pattern = String(args.pattern || "")
   const root = resolve(context, String(args.path || "."))
   const include = String(args.include || "**/*")
+  if (!(await ensureAllowed(context, root))) return { ok: false, output: "Denied by the user." }
+  if (!(await approved(context, { kind: "grep", title: "Search files", detail: pattern }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const ignored = await loadIgnore(context.cwd)
   let expression: RegExp
   try {
     expression = new RegExp(pattern)
@@ -347,6 +472,7 @@ async function grep(context: ToolContext, args: any): Promise<ToolResult> {
   for await (const file of new Bun.Glob(include).scan({ cwd: root, onlyFiles: true })) {
     if (file.includes("node_modules/") || file.startsWith(".git/")) continue
     const absolute = path.resolve(root, file)
+    if (ignored(path.relative(context.cwd, absolute) || file)) continue
     const stat = await fs.stat(absolute).catch(() => undefined)
     if (!stat || stat.size > 1_000_000) continue
     const content = await fs.readFile(absolute, "utf8").catch(() => undefined)
@@ -364,13 +490,165 @@ async function grep(context: ToolContext, args: any): Promise<ToolResult> {
 
 async function list(context: ToolContext, args: any): Promise<ToolResult> {
   const root = resolve(context, String(args.path || "."))
+  if (!(await ensureAllowed(context, root))) return { ok: false, output: "Denied by the user." }
+  if (!(await approved(context, { kind: "list", title: "List directory", detail: root }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const ignored = await loadIgnore(context.cwd)
   const entries = await fs.readdir(root, { withFileTypes: true })
   const output = entries
     .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
+    .filter((entry) => !ignored(path.relative(context.cwd, path.join(root, entry.name)) || entry.name))
     .slice(0, 500)
     .map((entry) => `${entry.isDirectory() ? "d" : "-"} ${entry.name}`)
     .join("\n")
   return { ok: true, output: output || "Empty directory." }
+}
+
+function decodeEntities(value: string) {
+  return value
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+}
+
+function htmlToText(html: string) {
+  return decodeEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+      .replace(/<\/(p|div|section|article|li|h[1-6]|tr|br)>/gi, "\n")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim(),
+  )
+}
+
+async function webfetch(context: ToolContext, args: any): Promise<ToolResult> {
+  const raw = String(args.url || "").trim()
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return { ok: false, output: `Invalid URL: ${raw}` }
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, output: "Only http and https URLs are supported." }
+  }
+  if (!(await approved(context, { kind: "webfetch", title: "Fetch URL", detail: url.toString() }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const response = await fetch(url, {
+    headers: { "user-agent": "ZelAI/0.1 (+https://ai.zelai.qzz.io)", accept: "text/html,application/json,text/plain,*/*" },
+    signal: AbortSignal.timeout(30_000),
+    redirect: "follow",
+  }).catch((error) => {
+    throw new Error(`Fetch failed: ${error instanceof Error ? error.message : error}`)
+  })
+  if (!response.ok) return { ok: false, output: `HTTP ${response.status} ${response.statusText}` }
+  const type = response.headers.get("content-type") || ""
+  const text = await response.text()
+  const body = type.includes("html") ? htmlToText(text) : text
+  const limit = Math.min(400_000, Math.max(1000, Number(args.max_chars) || 60_000))
+  return { ok: true, output: body.length > limit ? `${body.slice(0, limit)}\n... [truncated]` : body }
+}
+
+async function websearch(context: ToolContext, args: any): Promise<ToolResult> {
+  const query = String(args.query || "").trim()
+  if (!query) return { ok: false, output: "query must not be empty" }
+  if (!(await approved(context, { kind: "websearch", title: "Search the web", detail: query }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const limit = Math.min(15, Math.max(1, Number(args.num) || 8))
+  const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+    headers: { "user-agent": "Mozilla/5.0 (compatible; ZelAI/0.1)", accept: "text/html" },
+    signal: AbortSignal.timeout(30_000),
+  }).catch((error) => {
+    throw new Error(`Search failed: ${error instanceof Error ? error.message : error}`)
+  })
+  if (!response.ok) return { ok: false, output: `Search failed with HTTP ${response.status}` }
+  const html = await response.text()
+  const links: { title: string; url: string }[] = []
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = match[1]
+    if (!/result__a/.test(attrs)) continue
+    const href = /href="([^"]+)"/.exec(attrs)?.[1]
+    if (!href) continue
+    let url = href
+    try {
+      const parsed = new URL(href, "https://duckduckgo.com")
+      url = parsed.searchParams.get("uddg") || (href.startsWith("//") ? `https:${href}` : href)
+    } catch {}
+    const title = htmlToText(match[2]).replace(/\s+/g, " ").trim()
+    if (title && url.startsWith("http")) links.push({ title, url })
+    if (links.length >= limit) break
+  }
+  if (!links.length) return { ok: false, output: "No search results found." }
+  const snippets = [...html.matchAll(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|div|td)>/gi)].map((match) =>
+    htmlToText(match[1]).replace(/\s+/g, " ").trim(),
+  )
+  return {
+    ok: true,
+    output: links
+      .map((entry, index) => `${index + 1}. ${entry.title}\n${entry.url}${snippets[index] ? `\n${snippets[index]}` : ""}`)
+      .join("\n\n"),
+  }
+}
+
+async function applyPatch(context: ToolContext, args: any): Promise<ToolResult> {
+  const patch = String(args.patch ?? args.patchText ?? "")
+  if (!patch.trim()) return { ok: false, output: "patch must not be empty" }
+  if (!(await approved(context, { kind: "edit", title: "Apply patch", detail: patch.slice(0, 1200) }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const files = new Set<string>()
+  for (const match of patch.matchAll(/^\+\+\+ b\/(.+)$/gm)) files.add(match[1].trim())
+  for (const match of patch.matchAll(/^--- a\/(.+)$/gm)) files.add(match[1].trim())
+  const before = new Map<string, string | null>()
+  for (const file of files) {
+    const absolute = resolve(context, file)
+    before.set(absolute, await fs.readFile(absolute, "utf8").catch(() => null))
+  }
+  const proc = Bun.spawn(["git", "apply", "--whitespace=nowarn", "-"], {
+    cwd: context.cwd,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  proc.stdin.write(patch)
+  await proc.stdin.end()
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  if (code !== 0) {
+    return { ok: false, output: truncate(`git apply failed (exit ${code})\n${stderr || stdout}`.trim()) }
+  }
+  for (const [file, content] of before) await recordSnapshot(context.sessionId, file, content)
+  return { ok: true, output: `Applied patch to ${files.size} file${files.size === 1 ? "" : "s"}` }
+}
+
+async function skill(context: ToolContext, args: any): Promise<ToolResult> {
+  const name = String(args.name || "").trim()
+  if (!name) return { ok: false, output: `Available skills: ${(context.skills || []).map((entry) => entry.name).join(", ") || "none"}` }
+  if (!(await approved(context, { kind: "skill", title: "Load skill", detail: name }))) {
+    return { ok: false, output: "Denied by the user." }
+  }
+  const found = (context.skills || []).find((entry) => entry.name === name)
+  if (!found) {
+    return { ok: false, output: `Unknown skill: ${name}. Available: ${(context.skills || []).map((entry) => entry.name).join(", ") || "none"}` }
+  }
+  return { ok: true, output: truncate(`# Skill: ${found.name}\n\n${found.content}`) }
 }
 
 export async function executeTool(name: string, rawArgs: string, context: ToolContext): Promise<ToolResult> {
@@ -406,6 +684,14 @@ export async function executeTool(name: string, rawArgs: string, context: ToolCo
         return await grep(context, args)
       case "list":
         return await list(context, args)
+      case "webfetch":
+        return await webfetch(context, args)
+      case "websearch":
+        return await websearch(context, args)
+      case "apply_patch":
+        return await applyPatch(context, args)
+      case "skill":
+        return await skill(context, args)
       case "task":
         return await task(context, args)
       default:
@@ -420,6 +706,9 @@ export function describeTool(name: string, rawArgs: string) {
   try {
     const args = JSON.parse(rawArgs || "{}")
     if (name === "bash") return String(args.command || "").split("\n")[0]
+    if (name === "webfetch") return String(args.url || "")
+    if (name === "websearch") return String(args.query || "")
+    if (name === "skill") return String(args.name || "")
     if (args.path) return String(args.path)
     if (args.pattern) return String(args.pattern)
   } catch {}

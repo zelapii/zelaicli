@@ -5,9 +5,32 @@ export interface PermissionConfig {
   bash?: PermissionDecision | Record<string, PermissionDecision>
   task?: PermissionDecision
   mcp?: PermissionDecision
+  read?: PermissionDecision
+  glob?: PermissionDecision
+  grep?: PermissionDecision
+  list?: PermissionDecision
+  webfetch?: PermissionDecision
+  websearch?: PermissionDecision
+  skill?: PermissionDecision
+  external_directory?: PermissionDecision
+  question?: PermissionDecision
 }
 
-export type PermissionKind = "write" | "edit" | "bash" | "task" | "mcp"
+export type PermissionKind =
+  | "write"
+  | "edit"
+  | "bash"
+  | "task"
+  | "mcp"
+  | "read"
+  | "glob"
+  | "grep"
+  | "list"
+  | "webfetch"
+  | "websearch"
+  | "skill"
+  | "external_directory"
+  | "question"
 
 function wildcard(pattern: string, value: string) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
@@ -34,5 +57,16 @@ export function decisionFor(
   if (kind === "write" || kind === "edit") return config?.edit ?? "ask"
   if (kind === "task") return config?.task ?? "ask"
   if (kind === "mcp") return config?.mcp ?? "ask"
-  return "allow"
+  if (kind === "external_directory") return config?.external_directory ?? "ask"
+  return (config as any)?.[kind] ?? "allow"
+}
+
+export function mergePermission(base: PermissionConfig | undefined, override: PermissionConfig | undefined): PermissionConfig {
+  if (!base) return { ...(override || {}) }
+  if (!override) return { ...base }
+  const merged: PermissionConfig = { ...base, ...override }
+  if (base.bash && override.bash && typeof base.bash === "object" && typeof override.bash === "object") {
+    merged.bash = { ...base.bash, ...override.bash }
+  }
+  return merged
 }

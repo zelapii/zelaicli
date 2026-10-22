@@ -1,11 +1,14 @@
 #!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+import { join } from "node:path"
 import { createCliRenderer, type CliRendererConfig } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { type Agent, findAgent, loadAgents } from "./agents"
 import { deviceLogin, logout, whoami } from "./auth"
-import { apiKey, loadAccount, loadConfig, maskKey, mergeConfig, type Config } from "./config"
+import { apiKey, loadAccount, loadConfig, maskKey, mergeConfig, saveConfig, type Config } from "./config"
 import { loadCommands } from "./commands"
 import { compactSession } from "./compact"
+import { expandReferences, fileAttachments } from "./files"
 import { loadInstructions } from "./instructions"
 import { createMcpManager } from "./mcp"
 import { defaultModel, fetchModels, findModel, models } from "./models"
@@ -15,14 +18,18 @@ import { runOnce } from "./run"
 import {
   createSession,
   deleteSession,
+  forkSession,
   exportMarkdown,
   importSession,
   latestSession,
   listSessions,
   loadSession,
   saveSession,
+  type Session,
 } from "./session"
-import { undoLast } from "./undo"
+import { redoLast, undoLast } from "./undo"
+import { loadSkills } from "./skills"
+import { collectStats } from "./stats"
 import { App } from "./tui/app"
 
 const COMMANDS = new Set([
@@ -42,6 +49,10 @@ const COMMANDS = new Set([
   "mcp",
   "undo",
   "compact",
+  "redo",
+  "init",
+  "stats",
+  "skills",
   "upgrade",
   "help",
 ])
@@ -55,6 +66,10 @@ interface Flags {
   continue: boolean
   json: boolean
   yolo: boolean
+  fork: boolean
+  files: string[]
+  title?: string
+  format?: string
   help: boolean
   version: boolean
 }
@@ -65,6 +80,8 @@ function parse(argv: string[]): Flags {
     continue: false,
     json: false,
     yolo: false,
+    fork: false,
+    files: [],
     help: false,
     version: false,
   }
@@ -79,6 +96,17 @@ function parse(argv: string[]): Flags {
     else if (arg === "--continue" || arg === "-c") flags.continue = true
     else if (arg === "--json") flags.json = true
     else if (arg === "--yolo" || arg === "--auto") flags.yolo = true
+    else if (arg === "--fork") {
+      flags.fork = true
+      const next = argv[index + 1]
+      if (next && !next.startsWith("-") && !COMMANDS.has(next)) flags.session = argv[++index]
+    }
+    else if ((arg === "--file" || arg === "-f") && argv[index + 1]) flags.files.push(argv[++index])
+    else if (arg === "--title" && argv[index + 1]) flags.title = argv[++index]
+    else if (arg === "--format" && argv[index + 1]) {
+      flags.format = argv[++index]
+      if (flags.format === "json") flags.json = true
+    }
     else if ((arg === "--model" || arg === "-m") && argv[index + 1]) flags.model = argv[++index]
     else if (arg === "--agent" && argv[index + 1]) flags.agent = argv[++index]
     else if ((arg === "--session" || arg === "-s") && argv[index + 1]) flags.session = argv[++index]
@@ -98,6 +126,8 @@ Usage:
   zelai build [message...]       start in build mode
   zelai review [message...]      review current changes
   zelai agent <name> [message]   use a named agent
+  zelai agent list               list agents
+  zelai agent create <name>      create a custom agent file
   zelai models                   list available models
   zelai auth login               device login with your ZelAI account
   zelai auth logout              remove the saved key
@@ -107,9 +137,16 @@ Usage:
   zelai session export <id> [f]  export a session as markdown
   zelai session import <file>    import a session json file
   zelai session delete <id>      delete a session
+  zelai session fork <id> [t]    fork a session with a new title
   zelai commands                 list custom commands
   zelai mcp                      list configured MCP servers and tools
+  zelai mcp add <name> <cmd|url> add an MCP server to config
+  zelai mcp remove <name>        remove an MCP server
   zelai undo [session]           revert the last file change
+  zelai redo [session]           redo the last undone change
+  zelai init                     create or update AGENTS.md
+  zelai stats                    show local session statistics
+  zelai skills                   list global and project skills
   zelai compact [session]        summarize older session context
   zelai upgrade                  upgrade instructions
 
@@ -118,6 +155,10 @@ Flags:
       --agent <name>    agent for this run
   -c, --continue        continue the most recent session
   -s, --session <id>    continue a specific session
+      --fork [id]       fork a session before continuing
+  -f, --file <path>     attach a file to the prompt
+      --title <text>    set the session title
+      --format <fmt>    output format: text or json
       --json            stream JSON events (run only)
       --yolo            auto-approve write and shell tools
   -h, --help            show this help
@@ -234,6 +275,17 @@ async function sessionCommand(action: string, args: string[]) {
     process.stdout.write(`Imported ${session.id}\n`)
     return
   }
+  if (action === "fork") {
+    const id = args[0]
+    const session = id ? await loadSession(id) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    const forked = await forkSession(session, args.slice(1).join(" ") || undefined)
+    process.stdout.write(`Forked ${session.id} to ${forked.id}\n`)
+    return
+  }
   if (action === "delete" || action === "rm") {
     const id = args[0]
     if (!id) {
@@ -272,6 +324,7 @@ async function main() {
   const agents = await loadAgents(cwd)
   const customCommands = await loadCommands(cwd)
   const instructions = await loadInstructions(cwd, config)
+  const skills = await loadSkills(cwd)
   const command = flags.command
 
   if (command === "auth" || command === "login" || command === "logout" || command === "whoami") {
@@ -342,6 +395,78 @@ async function main() {
     return
   }
 
+  if (command === "stats") {
+    const stats = await collectStats()
+    process.stdout.write(`Sessions:   ${stats.sessions}
+Messages:   ${stats.messages} (${stats.user} user, ${stats.assistant} assistant)
+Tool calls: ${stats.toolCalls}
+Characters: ${stats.characters}
+`)
+    if (stats.tools.length) process.stdout.write(`\nTools:\n${stats.tools.map((item) => `  ${item.name.padEnd(20)} ${item.count}`).join("\n")}
+`)
+    if (stats.models.length) process.stdout.write(`\nModels:\n${stats.models.map((item) => `  ${item.name.padEnd(32)} ${item.count}`).join("\n")}
+`)
+    if (stats.agents.length) process.stdout.write(`\nAgents:\n${stats.agents.map((item) => `  ${item.name.padEnd(20)} ${item.count}`).join("\n")}
+`)
+    return
+  }
+
+  if (command === "skills") {
+    if (!skills.length) {
+      process.stdout.write("No skills. Add .zelai/skills/<name>/SKILL.md.\n")
+      return
+    }
+    for (const entry of skills) process.stdout.write(`${entry.name}  ${entry.description}  (${entry.path})\n`)
+    return
+  }
+
+  if (command === "agent") {
+    const action = flags.args[0]
+    if (action === "list" || action === "ls") {
+      for (const entry of agents) {
+        process.stdout.write(`${entry.id}  [${entry.mode}]${entry.hidden ? " hidden" : ""}  ${entry.description}
+`)
+      }
+      return
+    }
+    if (action === "create") {
+      const name = flags.args[1]
+      if (!name || !/^[a-z0-9][a-z0-9-]*$/i.test(name)) {
+        process.stderr.write("Usage: zelai agent create <name> [description]\n")
+        process.exit(1)
+      }
+      const dir = join(cwd, ".zelai", "agent")
+      await mkdir(dir, { recursive: true })
+      const file = join(dir, `${name}.md`)
+      const description = flags.args.slice(2).join(" ") || `Custom ${name} agent`
+      await Bun.write(file, `---
+description: ${description}
+mode: primary
+---
+
+You are the ${name} agent. Be concise and focused.
+`)
+      process.stdout.write(`Created ${file}
+`)
+      return
+    }
+  }
+
+  if (command === "redo") {
+    const session = flags.args[0] ? await loadSession(flags.args[0]) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    const redone = await redoLast(session.id)
+    if (!redone) {
+      process.stderr.write("Nothing to redo in this session.\n")
+      process.exit(1)
+    }
+    process.stdout.write(`Redid ${redone}\n`)
+    return
+  }
+
   if (command === "commands") {
     if (!customCommands.length) {
       process.stdout.write("No custom commands. Add markdown files under .zelai/command/.\n")
@@ -365,6 +490,35 @@ async function main() {
       process.exit(1)
     }
     process.stdout.write(`Reverted ${reverted}\n`)
+    return
+  }
+
+  if (command === "mcp" && (flags.args[0] === "add" || flags.args[0] === "remove")) {
+    const action = flags.args[0]
+    const name = flags.args[1]
+    if (!name) {
+      process.stderr.write(`Usage: zelai mcp ${action} <name> ...\n`)
+      process.exit(1)
+    }
+    config.mcp = config.mcp || {}
+    if (action === "remove") {
+      delete config.mcp[name]
+      await saveConfig(config)
+      process.stdout.write(`Removed MCP server ${name}\n`)
+      return
+    }
+    const target = flags.args[2]
+    if (!target) {
+      process.stderr.write("Usage: zelai mcp add <name> <command|url> [args...]\n")
+      process.exit(1)
+    }
+    if (/^https?:\/\//.test(target)) {
+      config.mcp[name] = { type: "remote", url: target }
+    } else {
+      config.mcp[name] = { type: "local", command: [target, ...flags.args.slice(3)] }
+    }
+    await saveConfig(config)
+    process.stdout.write(`Added MCP server ${name} to ~/.config/zelai/zelai.json\n`)
     return
   }
 
@@ -418,8 +572,8 @@ async function main() {
   const mcp = await createMcpManager(config.mcp, cwd)
   for (const warning of mcp.warnings) process.stderr.write(`[mcp] ${warning}\n`)
 
-  const agent = agentFor(flags, agents)
-  const model = await chooseModel(config, flags, catalog)
+  let agent = agentFor(flags, agents)
+  const model = agent.model || (await chooseModel(config, flags, catalog))
   let message: string
 
   if (command === "agent") {
@@ -429,6 +583,42 @@ async function main() {
     message = flags.args.join(" ").trim()
   } else {
     message = ""
+  }
+
+  if (command === "init") {
+    const initSession =
+      flags.session || flags.continue ? await resolveSession(flags, "build", model) : await createSession("build", model)
+    initSession.title = flags.title || "init"
+    const code = await runOnce({
+      config,
+      session: initSession,
+      agent: findAgent("build", agents),
+      model,
+      message:
+        "Analyze this repository and create or update AGENTS.md with build/test commands, architecture, and coding conventions. Keep it concise and factual. Use the write tool to save it.",
+      json: flags.json,
+      yolo: true,
+      cwd,
+      instructions,
+      agents,
+      mcp,
+      skills,
+    })
+    await mcp.close()
+    process.exit(code)
+  }
+
+  if (message && (message.includes("@") || message.startsWith("@"))) {
+    const expanded = await expandReferences(message, cwd, agents)
+    message = expanded.text
+    if (expanded.agent) agent = findAgent(expanded.agent, agents)
+  }
+
+  if (flags.files.length) {
+    const attached = await fileAttachments(flags.files, cwd)
+    if (attached) message = message ? `${message}
+
+${attached}` : attached
   }
 
   if (agent.id === "review" && !message) message = await reviewPrompt("")
@@ -456,6 +646,7 @@ async function main() {
       instructions,
       agents,
       mcp,
+      skills,
     })
     await mcp.close()
     process.exit(code)
@@ -481,6 +672,7 @@ async function main() {
         commands={customCommands}
         instructions={instructions}
         mcp={mcp}
+        skills={skills}
         prompt={message || undefined}
         cwd={cwd}
       />

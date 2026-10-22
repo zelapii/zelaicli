@@ -1,7 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { configDir } from "./paths"
-import type { Config } from "./config"
+import { parseJsonc, type Config } from "./config"
 
 async function exists(target: string) {
   return fs
@@ -22,7 +22,7 @@ export async function projectRoot(cwd: string) {
 
 export async function readJson<T>(file: string): Promise<T | undefined> {
   try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as T
+    return parseJsonc<T>(await fs.readFile(file, "utf8"))
   } catch {
     return undefined
   }

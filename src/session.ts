@@ -90,6 +90,16 @@ export async function latestSession(): Promise<Session | undefined> {
   return (await listSessions())[0]
 }
 
+export async function forkSession(session: Session, title?: string) {
+  const copy = JSON.parse(JSON.stringify(session)) as Session
+  copy.id = newId()
+  copy.title = title || `${session.title} (fork)`
+  copy.createdAt = Date.now()
+  copy.updatedAt = Date.now()
+  await saveSession(copy)
+  return copy
+}
+
 export async function deleteSession(id: string) {
   await fs.rm(fileFor(id), { force: true })
   await fs.rm(path.join(sessionsDir(), `${id}.undo.json`), { force: true })

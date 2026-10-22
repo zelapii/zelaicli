@@ -1,9 +1,10 @@
 import path from "node:path"
 import { readMarkdownDir, listValue } from "./markdown"
+import type { PermissionConfig } from "./permissions"
 import { globalAgentDirs, projectAgentDirs } from "./project"
 
 export type AgentTools = "all" | "readonly" | string[]
-export type AgentMode = "primary" | "subagent"
+export type AgentMode = "primary" | "subagent" | "all"
 
 export interface Agent {
   id: string
@@ -15,6 +16,12 @@ export interface Agent {
   system: string
   color: string
   source: "builtin" | "global" | "project"
+  model?: string
+  temperature?: number
+  topP?: number
+  steps?: number
+  permission?: PermissionConfig
+  hidden?: boolean
 }
 
 const BASE = `You are ZelAI, a coding agent running in the user's terminal.
@@ -48,6 +55,18 @@ You are in REVIEW mode. This is read-only.
 Review the provided change or code for correctness, regressions, security issues, and missing tests.
 Report findings ordered by severity. For each finding give file:line, why it matters, and a concrete fix.
 Do not rewrite the code unless the user asks. If there are no findings, say so plainly.`
+
+const EXPLORE = `${BASE}
+
+You are an exploration subagent. You are read-only.
+Find relevant files, symbols, and flows quickly using glob, grep, read, and list.
+Return a compact map of the codebase with file paths and line numbers. Do not propose large rewrites.`
+
+const SCOUT = `${BASE}
+
+You are an external research subagent. You are read-only in the workspace.
+Use webfetch and websearch to check documentation, upstream source, and dependency behavior.
+Return concise findings with links and exact version or path evidence.`
 
 const GENERAL = `${BASE}
 
@@ -90,6 +109,26 @@ export const AGENTS: Agent[] = [
     source: "builtin",
   },
   {
+    id: "explore",
+    name: "Explore",
+    description: "Fast read-only codebase exploration",
+    tools: "readonly",
+    mode: "subagent",
+    system: EXPLORE,
+    color: "#38bdf8",
+    source: "builtin",
+  },
+  {
+    id: "scout",
+    name: "Scout",
+    description: "Read-only external docs and dependency research",
+    tools: "readonly",
+    mode: "subagent",
+    system: SCOUT,
+    color: "#f472b6",
+    source: "builtin",
+  },
+  {
     id: "general",
     name: "General",
     description: "Subagent for focused research and implementation",
@@ -106,7 +145,35 @@ export function findAgent(id: string, agents: Agent[] = AGENTS) {
 }
 
 export function primaryAgents(agents: Agent[]) {
-  return agents.filter((agent) => agent.mode === "primary")
+  return agents.filter((agent) => agent.mode !== "subagent" && !agent.hidden)
+}
+
+function normalizeMode(value: string | undefined): AgentMode {
+  if (value === "primary" || value === "subagent") return value
+  return "all"
+}
+
+function numberValue(value: string | undefined) {
+  if (value === undefined || value === "") return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function parsePermission(value: string | undefined): PermissionConfig | undefined {
+  if (!value) return undefined
+  if (value.trim().startsWith("{")) {
+    try {
+      return JSON.parse(value) as PermissionConfig
+    } catch {
+      return undefined
+    }
+  }
+  const config: Record<string, string> = {}
+  for (const part of value.split(",")) {
+    const [key, action] = part.split("=").map((item) => item.trim())
+    if (key && (action === "allow" || action === "ask" || action === "deny")) config[key] = action
+  }
+  return Object.keys(config).length ? (config as PermissionConfig) : undefined
 }
 
 function normalizeTools(value: string | undefined): AgentTools {
@@ -119,16 +186,21 @@ function normalizeTools(value: string | undefined): AgentTools {
 async function loadDir(directory: string, source: "global" | "project"): Promise<Agent[]> {
   const files = await readMarkdownDir(directory)
   return files.map((file) => {
-    const mode = (file.data.mode === "primary" ? "primary" : "subagent") as AgentMode
+    const mode = normalizeMode(file.data.mode)
+    const permission = parsePermission(file.data.permission)
     return {
       id: file.name,
       name: file.data.name || file.name,
       description: file.data.description || file.body.split("\n")[0]?.slice(0, 120) || `Custom agent ${file.name}`,
       tools: normalizeTools(file.data.tools),
       mode,
-      ...(mode === "primary"
-        ? { subagents: listValue(file.data.subagents) || ["general"] }
-        : {}),
+      ...(mode !== "subagent" ? { subagents: listValue(file.data.subagents) || ["general"] } : {}),
+      ...(file.data.model ? { model: file.data.model } : {}),
+      ...(numberValue(file.data.temperature) !== undefined ? { temperature: numberValue(file.data.temperature) } : {}),
+      ...(numberValue(file.data.top_p) !== undefined ? { topP: numberValue(file.data.top_p) } : {}),
+      ...(numberValue(file.data.steps) !== undefined ? { steps: numberValue(file.data.steps) } : {}),
+      ...(permission ? { permission } : {}),
+      ...(file.data.hidden === "true" || file.data.hidden === "1" ? { hidden: true } : {}),
       system: file.body || BASE,
       color: file.data.color || "#c084fc",
       source,
@@ -147,7 +219,7 @@ export async function loadAgents(cwd: string) {
   return [...agents.values()]
 }
 
-export function agentContext(agent: Agent, cwd: string, instructions = "", summary = "") {
+export function agentContext(agent: Agent, cwd: string, instructions = "", summary = "", skills = "") {
   const now = new Date().toISOString()
   const parts = [
     agent.system,

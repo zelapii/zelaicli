@@ -5,17 +5,19 @@ import type { Config } from "../config"
 import { saveConfig } from "../config"
 import type { ModelInfo } from "../models"
 import { findModel } from "../models"
-import { type Agent, findAgent } from "../agents"
+import { type Agent, findAgent, primaryAgents } from "../agents"
 import type { Session, Todo } from "../session"
 import { createSession, listSessions, loadSession, saveSession } from "../session"
 import type { CustomCommand } from "../commands"
 import type { McpManager } from "../mcp"
 import { expandCommand } from "../commands"
 import { compactSession, shouldCompact } from "../compact"
-import { undoLast } from "../undo"
-import { runTurn, type EngineEvent } from "../engine"
+import { redoLast, undoLast } from "../undo"
+import { runTurn, type EngineEvent, type QuestionRequest } from "../engine"
 import type { ApprovalRequest } from "../tools"
 import { VERSION } from "../paths"
+import type { Skill } from "../skills"
+import { activeReference, expandReferences, listProjectFiles, matchFiles, replaceReference } from "../files"
 
 const BG = "#0b0d10"
 const PANEL = "#15181d"
@@ -41,6 +43,11 @@ interface Approval {
   resolve: (value: boolean) => void
 }
 
+interface Question {
+  request: QuestionRequest
+  resolve: (value: string) => void
+}
+
 export interface AppProps {
   config: Config
   session: Session
@@ -49,6 +56,7 @@ export interface AppProps {
   commands: CustomCommand[]
   instructions: string
   mcp?: McpManager
+  skills: Skill[]
   prompt?: string
   cwd: string
 }
@@ -93,6 +101,7 @@ export function App(props: AppProps) {
   let activeSession = props.session
   let currentAssistant: string | undefined
   let controller: AbortController | undefined
+  let hintGuard = false
 
   const [items, setItems] = createSignal<Item[]>(itemFromMessages(props.session))
   const [draft, setDraft] = createSignal("")
@@ -101,6 +110,11 @@ export function App(props: AppProps) {
   const [approval, setApproval] = createSignal<Approval | undefined>()
   const [agent, setAgent] = createSignal(findAgent(activeSession.agent || props.config.agent || "build", props.agents))
   const [todos, setTodos] = createSignal<Todo[]>(activeSession.todos || [])
+  const [details, setDetails] = createSignal(true)
+  const [question, setQuestion] = createSignal<Question | undefined>()
+  const [files, setFiles] = createSignal<string[]>([])
+  const [hints, setHints] = createSignal<string[]>([])
+  const [hintIndex, setHintIndex] = createSignal(0)
   const always = new Set<string>()
   const [model, setModel] = createSignal(
     activeSession.model || props.config.model || props.models[0]?.id || "deepseek-chat",
@@ -136,6 +150,43 @@ export function App(props: AppProps) {
         },
       })
     })
+
+  const requestQuestion = (request: QuestionRequest) =>
+    new Promise<string>((resolve) => {
+      add("info", [request.header, request.question, ...(request.options || []).map((option, index) => `${index + 1}. ${option.label}${option.description ? ` - ${option.description}` : ""}`)].filter(Boolean).join("\n"))
+      setQuestion({
+        request,
+        resolve: (value) => {
+          setQuestion(undefined)
+          add("info", `Answer: ${value}`)
+          resolve(value)
+          setTimeout(() => input?.focus(), 0)
+        },
+      })
+      setTimeout(() => input?.focus(), 0)
+    })
+
+  const currentModel = () => agent().model || model()
+
+  const updateHints = (value: string) => {
+    const ref = activeReference(value)
+    setHints(ref ? matchFiles(files(), ref.query) : [])
+    setHintIndex(0)
+  }
+
+  const applyHint = () => {
+    const ref = activeReference(draft())
+    const file = hints()[hintIndex()]
+    if (!ref || !file) return
+    const value = replaceReference(draft(), ref.start, file)
+    setDraft(value)
+    if (input) input.value = value
+    setHints([])
+    hintGuard = true
+    setTimeout(() => {
+      hintGuard = false
+    }, 50)
+  }
 
   const persist = async () => {
     activeSession.agent = agent().id
@@ -184,8 +235,12 @@ export function App(props: AppProps) {
       add("error", "Not logged in. Run `zelai auth login`, then restart ZelAI.")
       return
     }
+    const display = text
+    const prepared = await expandReferences(text, props.cwd, props.agents)
+    if (prepared.agent) setCurrentAgent(prepared.agent)
+    text = prepared.text || "Review the attached file."
     const currentAgent = agent()
-    add("user", text)
+    add("user", display)
     activeSession.messages.push({ role: "user", content: text })
     activeSession.agent = currentAgent.id
     activeSession.model = model()
@@ -193,13 +248,14 @@ export function App(props: AppProps) {
     setBusy(true)
     setStep(0)
     currentAssistant = undefined
-    const catalog = props.models.find((entry) => entry.id === model())
+    const activeModel = currentModel()
+    const catalog = props.models.find((entry) => entry.id === activeModel)
     if (shouldCompact(activeSession, catalog?.context)) {
       add("info", "Compacting earlier context...")
       const compacted = await compactSession(activeSession, {
         baseUrl: props.config.baseUrl,
         apiKey: props.config.apiKey!,
-        model: model(),
+        model: activeModel,
       }).catch(() => false)
       if (compacted) {
         add("info", "Context compacted.")
@@ -213,7 +269,7 @@ export function App(props: AppProps) {
         agent: currentAgent,
         baseUrl: props.config.baseUrl,
         apiKey: props.config.apiKey,
-        model: model(),
+        model: activeModel,
         cwd: props.cwd,
         approve: requestApproval,
         permission: props.config.permission,
@@ -221,6 +277,9 @@ export function App(props: AppProps) {
         agents: props.agents,
         instructions: props.instructions,
         mcp: props.mcp,
+        skills: props.skills,
+        formatter: props.config.formatter,
+        askQuestion: requestQuestion,
         signal: controller.signal,
         onEvent: event,
         onPersist: persist,
@@ -234,6 +293,29 @@ export function App(props: AppProps) {
       setStep(0)
       await persist()
       scrollDown()
+    }
+  }
+
+  const runShell = async (command: string) => {
+    add("user", `!${command}`)
+    setBusy(true)
+    try {
+      const proc = Bun.spawn(["bash", "-lc", command], { cwd: props.cwd, stdout: "pipe", stderr: "pipe" })
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+      const output = [stdout.trimEnd(), stderr.trim() ? `[stderr]\n${stderr.trimEnd()}` : "", `[exit ${code}]`]
+        .filter(Boolean)
+        .join("\n")
+      add("tool", code === 0 ? "shell" : "shell FAILED", output.length > 4000 ? `${output.slice(0, 4000)}\n...` : output)
+      activeSession.messages.push({ role: "user", content: `Shell command: ${command}\n\n${output}` })
+      await persist()
+    } catch (error) {
+      add("error", error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -282,6 +364,10 @@ export function App(props: AppProps) {
             "/sessions       list recent sessions",
             "/resume <id>    load a session",
             "/undo           revert the last file change",
+            "/redo           redo the last undone change",
+            "/details        toggle tool output details",
+            "/skills         list available skills",
+            "/init           create or update AGENTS.md",
             "/compact        summarize older context",
             "/commands       list custom commands",
             "/mcp            list MCP servers and tools",
@@ -302,7 +388,7 @@ export function App(props: AppProps) {
         return
       case "agent":
         if (argument) setCurrentAgent(argument)
-        else add("info", `Agents:\n${props.agents.filter((entry) => entry.mode === "primary").map((entry) => `${entry.id === agent().id ? "*" : " "} ${entry.id} - ${entry.description}`).join("\n")}`)
+        else add("info", `Agents:\n${primaryAgents(props.agents).map((entry) => `${entry.id === agent().id ? "*" : " "} ${entry.id} - ${entry.description}${entry.model ? ` [${entry.model}]` : ""}`).join("\n")}`)
         return
       case "plan":
       case "build":
@@ -348,6 +434,27 @@ export function App(props: AppProps) {
         add("info", reverted ? `Reverted ${reverted}` : "Nothing to undo in this session.")
         return
       }
+      case "redo": {
+        const redone = await redoLast(activeSession.id)
+        add("info", redone ? `Redid ${redone}` : "Nothing to redo in this session.")
+        return
+      }
+      case "details":
+        setDetails(!details())
+        add("info", `Tool details ${details() ? "on" : "off"}.`)
+        return
+      case "skills":
+        add(
+          "info",
+          props.skills.length
+            ? props.skills.map((entry) => `${entry.name} - ${entry.description}`).join("\n")
+            : "No skills. Add .zelai/skills/<name>/SKILL.md.",
+        )
+        return
+      case "init":
+        setCurrentAgent("build")
+        await run("Analyze this repository and create or update AGENTS.md with build/test commands, architecture, and coding conventions. Keep it concise and factual. Use the write tool to save it.")
+        return
       case "compact": {
         if (busy()) return
         setBusy(true)
@@ -395,10 +502,33 @@ export function App(props: AppProps) {
   }
 
   const submit = async () => {
+    if (hintGuard) {
+      hintGuard = false
+      return
+    }
+    if (hints().length && activeReference(draft())) {
+      applyHint()
+      return
+    }
     const text = draft().trim()
-    if (!text || busy()) return
+    if (!text) return
+    if (question()) {
+      const options = question()!.request.options || []
+      const index = /^\d+$/.test(text) ? Number(text) - 1 : -1
+      const answer = index >= 0 && options[index] ? options[index].label : text
+      setDraft("")
+      if (input) input.value = ""
+      question()!.resolve(answer)
+      return
+    }
+    if (busy()) return
     setDraft("")
     if (input) input.value = ""
+    setHints([])
+    if (text.startsWith("!")) {
+      await runShell(text.slice(1).trim())
+      return
+    }
     if (text.startsWith("/")) {
       await command(text)
       return
@@ -424,6 +554,36 @@ export function App(props: AppProps) {
       }
       return
     }
+    if (!question() && hints().length) {
+      if (key.name === "tab" || key.name === "return") {
+        key.preventDefault?.()
+        applyHint()
+        return
+      }
+      if (key.name === "escape") {
+        key.preventDefault?.()
+        setHints([])
+        return
+      }
+      if (key.name === "down") {
+        key.preventDefault?.()
+        setHintIndex((hintIndex() + 1) % hints().length)
+        return
+      }
+      if (key.name === "up") {
+        key.preventDefault?.()
+        setHintIndex((hintIndex() + hints().length - 1) % hints().length)
+        return
+      }
+    }
+    if (key.name === "tab" && !question() && !busy()) {
+      key.preventDefault?.()
+      const list = primaryAgents(props.agents)
+      const index = list.findIndex((entry) => entry.id === agent().id)
+      const next = list[(index + 1) % list.length]
+      if (next) setCurrentAgent(next.id)
+      return
+    }
     if (key.ctrl && key.name === "c") {
       if (busy() && controller) {
         controller.abort()
@@ -435,6 +595,7 @@ export function App(props: AppProps) {
   })
 
   onMount(() => {
+    listProjectFiles(props.cwd).then(setFiles).catch(() => {})
     input?.focus()
     if (props.prompt) {
       setTimeout(() => run(props.prompt!), 100)
@@ -495,7 +656,7 @@ export function App(props: AppProps) {
                 <span style={{ fg: colorFor(item) }}>{prefixFor(item)}</span>
                 <span style={{ fg: item.kind === "user" ? TEXT : colorFor(item) }}>{item.text}</span>
               </text>
-              <Show when={item.meta}>
+              <Show when={item.meta && (details() || item.kind !== "tool")}>
                 <text wrapMode="word" fg={MUTED}>
                   {item.kind === "tool" ? `    ${item.meta}` : item.meta}
                 </text>
@@ -530,7 +691,7 @@ export function App(props: AppProps) {
       <Show when={busy()}>
         <box height={1} paddingLeft={1} flexShrink={0}>
           <text fg={YELLOW}>
-            working · step {step()} · {agent().name} · {shortModel(model())}
+            working · step {step()} · {agent().name} · {shortModel(currentModel())}
           </text>
         </box>
       </Show>
@@ -566,6 +727,61 @@ export function App(props: AppProps) {
         </box>
       </Show>
 
+      <Show when={question()}>
+        <box
+          position="absolute"
+          bottom={5}
+          left={2}
+          right={2}
+          zIndex={110}
+          border
+          borderColor={BLUE}
+          backgroundColor={PANEL}
+          flexDirection="column"
+          paddingLeft={1}
+          paddingRight={1}
+          paddingTop={1}
+          paddingBottom={1}
+        >
+          <text fg={BLUE} attributes={TextAttributes.BOLD}>
+            {question()!.request.header || "Question"}
+          </text>
+          <text fg={TEXT} wrapMode="word">
+            {question()!.request.question}
+          </text>
+          <For each={question()!.request.options || []}>
+            {(option, index) => (
+              <text fg={MUTED} wrapMode="word">
+                {index() + 1}. {option.label}
+                {option.description ? ` - ${option.description}` : ""}
+              </text>
+            )}
+          </For>
+          <text fg={MUTED}>type an answer or a number, then enter</text>
+        </box>
+      </Show>
+
+      <Show when={!question() && hints().length}>
+        <box
+          flexShrink={0}
+          border={["top"]}
+          borderColor={BORDER}
+          paddingLeft={1}
+          paddingRight={1}
+          flexDirection="column"
+        >
+          <For each={hints().slice(0, 8)}>
+            {(file, index) => (
+              <text fg={index() === hintIndex() ? ACCENT : MUTED} wrapMode="none">
+                {index() === hintIndex() ? "> " : "  "}
+                {file}
+              </text>
+            )}
+          </For>
+          <text fg={MUTED}>tab/enter to insert · esc to close</text>
+        </box>
+      </Show>
+
       <box
         flexShrink={0}
         border={["top"]}
@@ -584,14 +800,17 @@ export function App(props: AppProps) {
           backgroundColor={PANEL}
           textColor={TEXT}
           cursorColor={ACCENT}
-          onInput={(value: string) => setDraft(value)}
+          onInput={(value: string) => {
+            setDraft(value)
+            updateHints(value)
+          }}
           onSubmit={submit}
         />
       </box>
 
       <box height={1} flexShrink={0} paddingLeft={1} paddingRight={1} justifyContent="space-between" flexDirection="row">
         <text fg={MUTED}>
-          {agent().name} · {shortModel(model())}
+          {agent().name} · {shortModel(currentModel())}
         </text>
         <text fg={MUTED}>{busy() ? "ctrl+c cancel" : `enter · ^C quit · /help${todos().length ? ` · ${todos().filter((todo) => todo.status === "completed").length}/${todos().length}` : ""}`}</text>
       </box>

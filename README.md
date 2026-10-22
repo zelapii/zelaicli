@@ -40,27 +40,40 @@ zelai run "fix the failing test"
 zelai plan "add rate limiting" # read-only planning
 zelai review                   # review the current diff
 zelai agent review             # named agent
+zelai agent list               # list agents
+zelai agent create docs        # create a custom agent
 zelai models                   # list models
 zelai sessions                 # list saved sessions
 zelai session show <id>        # print a saved session
 zelai session export <id> [f]  # export markdown
 zelai session import <file>    # import session json
 zelai session delete <id>      # delete a session
+zelai session fork <id> "name" # fork a session
 zelai commands                 # list custom commands
+zelai skills                   # list skills
 zelai mcp                      # list MCP servers and tools
+zelai mcp add docs <cmd|url>   # add an MCP server to config
 zelai undo [session]           # revert the last file change
+zelai redo [session]           # redo the last undone change
+zelai init                     # create or update AGENTS.md
+zelai stats                    # session and tool statistics
 zelai compact [session]        # summarize older context
+zelai --fork -c                # fork the latest session
+zelai run -f src/app.ts "review this file"
 ```
 
 Inside the TUI:
 
-- `/model [id]`, `/agent [name]`
-- `/plan`, `/build`, `/review`
-- `/new`, `/sessions`, `/resume <id>`
-- `/undo`, `/compact`, `/commands`
-- `/help`, `/quit`
+- `/model [id]`, `/agent [name]`, `/plan`, `/build`, `/review`
+- `/new`, `/sessions`, `/resume <id>`, `/fork <id>`
+- `/undo`, `/redo`, `/compact`, `/details`, `/init`
+- `/commands`, `/skills`, `/mcp`, `/help`, `/quit`
+- `@path` completes project files; Tab inserts the highlighted file
+- `@agent` switches agent for one prompt
+- `!command` runs a shell command and adds the output to the conversation
+- Tab with an empty prompt cycles primary agents
 
-Writes and shell commands can be approved once or always. Todos from the model appear above the prompt.
+Writes and shell commands can be approved once or always. Todos from the model appear above the prompt, and `question` prompts show an inline choice dialog.
 
 ## Permissions
 
@@ -74,22 +87,46 @@ Writes and shell commands require approval by default. Configure it in `~/.confi
   "permission": {
     "edit": "ask",
     "bash": { "git status": "allow", "git *": "ask", "rm *": "deny" },
-    "task": "ask"
+    "task": "ask",
+    "read": "allow",
+    "webfetch": "allow",
+    "websearch": "ask",
+    "skill": "allow",
+    "external_directory": "ask"
   }
 }
 ```
 
-`zelai run --yolo` auto-approves tools.
+Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `external_directory`, and `question`. `zelai run --yolo` auto-approves tools.
 
 ## Project files
 
 - `AGENTS.md`, `.zelai/AGENTS.md` — project instructions
 - `.zelai/zelai.json` — project config, merged over global config
-- `.zelai/agent/*.md` — custom agents (frontmatter: `description`, `mode`, `tools`, `subagents`)
+- `.zelai/agent/*.md` — custom agents (frontmatter: `description`, `mode`, `tools`, `subagents`, `model`, `temperature`, `top_p`, `steps`, `permission`, `hidden`)
 - `.zelai/command/*.md` — custom slash commands; `$ARGUMENTS` is replaced with the typed text
+- `.zelai/skills/<name>/SKILL.md` — project skills loaded on demand
 - Global equivalents live under `~/.config/zelai/`
 
-Agents can call `task` to delegate a focused job to a subagent and `todowrite` to maintain the visible todo list. Every write/edit is snapshotted so `/undo` can revert it.
+Both config files accept JSONC (comments and trailing commas). Built-in agents are `build`, `plan`, `review`, plus `explore`, `scout`, and `general` subagents.
+
+Agents can call `task` to delegate a focused job to a subagent and `todowrite` to maintain the visible todo list. Every write/edit is snapshotted so `/undo` and `/redo` can move file changes forward and back.
+
+## Tools
+
+The model can use `read`, `write`, `edit`, `bash`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `apply_patch`, `skill`, `task`, `todowrite`, `question`, and connected MCP tools. File discovery and search honor `.gitignore` and `.ignore`.
+
+Optional formatters run after `write`/`edit`:
+
+```jsonc
+{
+  // key is a glob, value is a shell command
+  "formatter": {
+    "*.ts": "bunx prettier --write $FILE",
+    "*.go": "gofmt -w $FILE"
+  }
+}
+```
 
 ## MCP
 
@@ -122,7 +159,7 @@ src/
   tui/app.tsx     OpenTUI interface
   engine.ts       streaming agent loop
   api.ts          OpenAI-compatible client with retries
-  tools.ts        read/write/edit/bash/glob/grep/list/task/todowrite
+  tools.ts        read/write/edit/bash/glob/grep/list/web/apply_patch/skill/task/todowrite
   agents.ts       agent prompts, custom agents, subagents
   session.ts      local session store, export/import
   permissions.ts  allow/ask/deny rules with bash patterns
@@ -131,6 +168,11 @@ src/
   instructions.ts AGENTS.md loader
   compact.ts      context compaction
   mcp.ts          MCP stdio/HTTP client and tool bridge
-  config.ts       config and account state
+  files.ts        project file index, @references, attachments
+  ignore.ts       .gitignore/.ignore matcher
+  skills.ts       skill discovery
+  formatters.ts   post-edit formatter runner
+  stats.ts        local session statistics
+  config.ts       config, JSONC parsing, and account state
   auth.ts         device login
 ```

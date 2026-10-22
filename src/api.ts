@@ -32,6 +32,8 @@ export interface ChatOptions {
   tools?: ToolDefinition[]
   signal?: AbortSignal
   onText?: (delta: string) => void
+  temperature?: number
+  top_p?: number
 }
 
 export interface ChatResult {
@@ -95,6 +97,8 @@ async function request(options: ChatOptions, includeTools: boolean) {
     stream: true,
     stream_options: { include_usage: true },
   }
+  if (typeof options.temperature === "number") body.temperature = options.temperature
+  if (typeof options.top_p === "number") body.top_p = options.top_p
   if (includeTools && options.tools?.length) {
     body.tools = options.tools
     body.tool_choice = "auto"
