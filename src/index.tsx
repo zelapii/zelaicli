@@ -1,13 +1,27 @@
 #!/usr/bin/env bun
 import { createCliRenderer, type CliRendererConfig } from "@opentui/core"
 import { render } from "@opentui/solid"
-import { AGENTS, findAgent } from "./agents"
+import { type Agent, findAgent, loadAgents } from "./agents"
 import { deviceLogin, logout, whoami } from "./auth"
-import { apiKey, loadAccount, loadConfig, maskKey, type Config } from "./config"
+import { apiKey, loadAccount, loadConfig, maskKey, mergeConfig, type Config } from "./config"
+import { loadCommands } from "./commands"
+import { compactSession } from "./compact"
+import { loadInstructions } from "./instructions"
 import { defaultModel, fetchModels, findModel, models } from "./models"
 import { VERSION } from "./paths"
-import { createSession, latestSession, loadSession } from "./session"
+import { loadProjectConfig } from "./project"
 import { runOnce } from "./run"
+import {
+  createSession,
+  deleteSession,
+  exportMarkdown,
+  importSession,
+  latestSession,
+  listSessions,
+  loadSession,
+  saveSession,
+} from "./session"
+import { undoLast } from "./undo"
 import { App } from "./tui/app"
 
 const COMMANDS = new Set([
@@ -22,6 +36,10 @@ const COMMANDS = new Set([
   "logout",
   "whoami",
   "sessions",
+  "session",
+  "commands",
+  "undo",
+  "compact",
   "upgrade",
   "help",
 ])
@@ -83,30 +101,43 @@ Usage:
   zelai auth logout              remove the saved key
   zelai auth whoami              show the current account
   zelai sessions                 list saved sessions
+  zelai session show <id>        print a session
+  zelai session export <id> [f]  export a session as markdown
+  zelai session import <file>    import a session json file
+  zelai session delete <id>      delete a session
+  zelai commands                 list custom commands
+  zelai undo [session]           revert the last file change
+  zelai compact [session]        summarize older session context
   zelai upgrade                  upgrade instructions
 
 Flags:
   -m, --model <id>      model for this run
-      --agent <name>    agent for this run (build, plan, review)
+      --agent <name>    agent for this run
   -c, --continue        continue the most recent session
   -s, --session <id>    continue a specific session
       --json            stream JSON events (run only)
       --yolo            auto-approve write and shell tools
   -h, --help            show this help
   -v, --version         show version
+
+Project files:
+  .zelai/zelai.json     project config (model, agent, permission, instructions)
+  AGENTS.md             project instructions
+  .zelai/agent/*.md     custom agents
+  .zelai/command/*.md   custom slash commands
 `)
 }
 
-function agentFor(flags: Flags) {
+function agentFor(flags: Flags, agents: Agent[]) {
   if (flags.command === "plan" || flags.command === "build" || flags.command === "review") {
-    return findAgent(flags.command)
+    return findAgent(flags.command, agents)
   }
-  if (flags.agent) return findAgent(flags.agent)
+  if (flags.agent) return findAgent(flags.agent, agents)
   if (flags.command === "agent") {
     const name = flags.args[0]
-    return findAgent(name || "build")
+    return findAgent(name || "build", agents)
   }
-  return findAgent("build")
+  return findAgent("build", agents)
 }
 
 async function chooseModel(config: Config, flags: Flags, catalog?: Awaited<ReturnType<typeof fetchModels>>) {
@@ -153,6 +184,67 @@ async function reviewPrompt(message: string) {
   }
 }
 
+async function sessionCommand(action: string, args: string[]) {
+  if (action === "list" || action === "ls") {
+    const sessions = await listSessions()
+    if (!sessions.length) {
+      process.stdout.write("No sessions yet.\n")
+      return
+    }
+    for (const session of sessions.slice(0, 30)) {
+      process.stdout.write(`${session.id}  ${new Date(session.updatedAt).toISOString()}  ${session.title}\n`)
+    }
+    return
+  }
+  if (action === "show") {
+    const id = args[0]
+    const session = id ? await loadSession(id) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    process.stdout.write(exportMarkdown(session) + "\n")
+    return
+  }
+  if (action === "export") {
+    const id = args[0]
+    const session = id ? await loadSession(id) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    const target = args[1]
+    const markdown = exportMarkdown(session) + "\n"
+    if (target) {
+      await Bun.write(target, markdown)
+      process.stdout.write(`Exported ${session.id} to ${target}\n`)
+    } else process.stdout.write(markdown)
+    return
+  }
+  if (action === "import") {
+    const file = args[0]
+    if (!file) {
+      process.stderr.write("Usage: zelai session import <file>\n")
+      process.exit(1)
+    }
+    const session = await importSession(file)
+    process.stdout.write(`Imported ${session.id}\n`)
+    return
+  }
+  if (action === "delete" || action === "rm") {
+    const id = args[0]
+    if (!id) {
+      process.stderr.write("Usage: zelai session delete <id>\n")
+      process.exit(1)
+    }
+    await deleteSession(id)
+    process.stdout.write(`Deleted ${id}\n`)
+    return
+  }
+  process.stderr.write(`Unknown session action: ${action}\n`)
+  process.exit(1)
+}
+
 process.stdout.on("error", (error: any) => {
   if (error?.code === "EPIPE") process.exit(0)
 })
@@ -171,7 +263,12 @@ async function main() {
     return
   }
 
-  const config = await loadConfig()
+  const cwd = process.cwd()
+  let config = await loadConfig()
+  config = mergeConfig(config, await loadProjectConfig(cwd))
+  const agents = await loadAgents(cwd)
+  const customCommands = await loadCommands(cwd)
+  const instructions = await loadInstructions(cwd, config)
   const command = flags.command
 
   if (command === "auth" || command === "login" || command === "logout" || command === "whoami") {
@@ -182,7 +279,7 @@ async function main() {
       })
       const who = result.account?.email || result.account?.name || "your ZelAI account"
       await fetchModels(config.baseUrl).catch(() => [])
-      process.stdout.write(`\nLogged in as ${who}. Key saved to ${config.baseUrl ? "~/.config/zelai/zelai.json" : ""}\n`)
+      process.stdout.write(`\nLogged in as ${who}. Key saved to ~/.config/zelai/zelai.json\n`)
       return
     }
     if (action === "logout") {
@@ -232,11 +329,39 @@ async function main() {
   }
 
   if (command === "sessions") {
-    const sessions = await import("./session")
-    const list = await sessions.listSessions()
-    for (const session of list.slice(0, 30)) {
-      process.stdout.write(`${session.id}  ${new Date(session.updatedAt).toISOString()}  ${session.title}\n`)
+    await sessionCommand("list", flags.args)
+    return
+  }
+
+  if (command === "session") {
+    const action = flags.args[0] || "list"
+    await sessionCommand(action, flags.args.slice(1))
+    return
+  }
+
+  if (command === "commands") {
+    if (!customCommands.length) {
+      process.stdout.write("No custom commands. Add markdown files under .zelai/command/.\n")
+      return
     }
+    for (const item of customCommands) {
+      process.stdout.write(`${item.name}  ${item.description}  (${item.source})\n`)
+    }
+    return
+  }
+
+  if (command === "undo") {
+    const session = flags.args[0] ? await loadSession(flags.args[0]) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    const reverted = await undoLast(session.id)
+    if (!reverted) {
+      process.stderr.write("Nothing to undo in this session.\n")
+      process.exit(1)
+    }
+    process.stdout.write(`Reverted ${reverted}\n`)
     return
   }
 
@@ -252,7 +377,29 @@ async function main() {
 
   let catalog = await models(config.baseUrl)
   if (!catalog.length) catalog = await fetchModels(config.baseUrl).catch(() => [])
-  const agent = agentFor(flags)
+
+  if (command === "compact") {
+    const session = flags.args[0] ? await loadSession(flags.args[0]) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    const model = await chooseModel(config, flags, catalog)
+    const compacted = await compactSession(session, {
+      baseUrl: config.baseUrl,
+      apiKey: config.apiKey!,
+      model,
+    })
+    if (!compacted) {
+      process.stderr.write("Not enough history to compact.\n")
+      process.exit(1)
+    }
+    await saveSession(session)
+    process.stdout.write(`Compacted ${session.id}\n`)
+    return
+  }
+
+  const agent = agentFor(flags, agents)
   const model = await chooseModel(config, flags, catalog)
   let message: string
 
@@ -286,15 +433,14 @@ async function main() {
       message,
       json: flags.json,
       yolo: flags.yolo,
-      cwd: process.cwd(),
+      cwd,
+      instructions,
+      agents,
     })
     process.exit(code)
   }
 
   if (agent.id === "review" && message === "") message = await reviewPrompt("")
-  if (agent.tools === "readonly" && command !== "plan" && command !== "review" && flags.command === "agent") {
-    // named readonly agents still work; nothing to adjust
-  }
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -310,8 +456,11 @@ async function main() {
         config={config}
         session={session}
         models={catalog}
+        agents={agents}
+        commands={customCommands}
+        instructions={instructions}
         prompt={message || undefined}
-        cwd={process.cwd()}
+        cwd={cwd}
       />
     ),
     renderer,

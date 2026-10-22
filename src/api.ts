@@ -81,6 +81,8 @@ function parseToolCalls(delta: any, state: Map<number, ToolCall>) {
   }
 }
 
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 async function request(options: ChatOptions, includeTools: boolean) {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -98,14 +100,32 @@ async function request(options: ChatOptions, includeTools: boolean) {
     body.tool_choice = "auto"
   }
 
-  const response = await fetch(endpoint(options.baseUrl), {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    signal: options.signal,
-  })
-  if (!response.ok) throw new ApiError(await readError(response), response.status)
-  return response
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(endpoint(options.baseUrl), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+      })
+      if (response.ok) return response
+      const retryable = response.status === 429 || response.status >= 500
+      if (retryable && attempt < 2) {
+        await response.body?.cancel()
+        await wait(1000 * (attempt + 1))
+        continue
+      }
+      throw new ApiError(await readError(response), response.status)
+    } catch (error) {
+      if (error instanceof ApiError) throw error
+      if (attempt < 2) {
+        await wait(1000 * (attempt + 1))
+        continue
+      }
+      throw error
+    }
+  }
+  throw new ApiError("The model request failed after 3 attempts") 
 }
 
 export async function chat(options: ChatOptions): Promise<ChatResult> {

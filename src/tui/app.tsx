@@ -5,9 +5,13 @@ import type { Config } from "../config"
 import { saveConfig } from "../config"
 import type { ModelInfo } from "../models"
 import { findModel } from "../models"
-import { AGENTS, findAgent } from "../agents"
-import type { Session } from "../session"
+import { type Agent, findAgent } from "../agents"
+import type { Session, Todo } from "../session"
 import { createSession, listSessions, loadSession, saveSession } from "../session"
+import type { CustomCommand } from "../commands"
+import { expandCommand } from "../commands"
+import { compactSession, shouldCompact } from "../compact"
+import { undoLast } from "../undo"
 import { runTurn, type EngineEvent } from "../engine"
 import type { ApprovalRequest } from "../tools"
 import { VERSION } from "../paths"
@@ -40,6 +44,9 @@ export interface AppProps {
   config: Config
   session: Session
   models: ModelInfo[]
+  agents: Agent[]
+  commands: CustomCommand[]
+  instructions: string
   prompt?: string
   cwd: string
 }
@@ -73,7 +80,8 @@ function itemFromMessages(session: Session): Item[] {
 }
 
 function shortModel(model: string) {
-  return model.includes("/") ? model.split("/").pop()! : model
+  const id = model.includes("/") ? model.split("/").pop()! : model
+  return id.length > 28 ? `${id.slice(0, 27)}…` : id
 }
 
 export function App(props: AppProps) {
@@ -89,7 +97,9 @@ export function App(props: AppProps) {
   const [busy, setBusy] = createSignal(false)
   const [step, setStep] = createSignal(0)
   const [approval, setApproval] = createSignal<Approval | undefined>()
-  const [agent, setAgent] = createSignal(findAgent(activeSession.agent || props.config.agent || "build"))
+  const [agent, setAgent] = createSignal(findAgent(activeSession.agent || props.config.agent || "build", props.agents))
+  const [todos, setTodos] = createSignal<Todo[]>(activeSession.todos || [])
+  const always = new Set<string>()
   const [model, setModel] = createSignal(
     activeSession.model || props.config.model || props.models[0]?.id || "deepseek-chat",
   )
@@ -151,6 +161,10 @@ export function App(props: AppProps) {
       setStep(value.step)
       return
     }
+    if (value.type === "todos") {
+      setTodos(value.todos)
+      return
+    }
     if (value.type === "tool_start") {
       add("tool", value.name, value.args.slice(0, 200))
       return
@@ -174,10 +188,23 @@ export function App(props: AppProps) {
     activeSession.agent = currentAgent.id
     activeSession.model = model()
     await saveSession(activeSession)
-    controller = new AbortController()
     setBusy(true)
     setStep(0)
     currentAssistant = undefined
+    const catalog = props.models.find((entry) => entry.id === model())
+    if (shouldCompact(activeSession, catalog?.context)) {
+      add("info", "Compacting earlier context...")
+      const compacted = await compactSession(activeSession, {
+        baseUrl: props.config.baseUrl,
+        apiKey: props.config.apiKey!,
+        model: model(),
+      }).catch(() => false)
+      if (compacted) {
+        add("info", "Context compacted.")
+        await saveSession(activeSession)
+      }
+    }
+    controller = new AbortController()
     try {
       await runTurn({
         session: activeSession,
@@ -187,6 +214,10 @@ export function App(props: AppProps) {
         model: model(),
         cwd: props.cwd,
         approve: requestApproval,
+        permission: props.config.permission,
+        always,
+        agents: props.agents,
+        instructions: props.instructions,
         signal: controller.signal,
         onEvent: event,
         onPersist: persist,
@@ -204,7 +235,7 @@ export function App(props: AppProps) {
   }
 
   const setCurrentAgent = (id: string) => {
-    const next = findAgent(id)
+    const next = findAgent(id, props.agents)
     setAgent(next)
     activeSession.agent = next.id
     props.config.agent = next.id
@@ -247,8 +278,12 @@ export function App(props: AppProps) {
             "/new            start a new session",
             "/sessions       list recent sessions",
             "/resume <id>    load a session",
+            "/undo           revert the last file change",
+            "/compact        summarize older context",
+            "/commands       list custom commands",
             "/login          login instructions",
             "/quit           exit",
+            ...(props.commands.length ? ["", "Custom commands:", ...props.commands.map((item) => `/${item.name.padEnd(14)} ${item.description}`)] : []),
           ].join("\n"),
         )
         return
@@ -263,7 +298,7 @@ export function App(props: AppProps) {
         return
       case "agent":
         if (argument) setCurrentAgent(argument)
-        else add("info", `Agents:\n${AGENTS.map((entry) => `${entry.id === agent().id ? "*" : " "} ${entry.id} - ${entry.description}`).join("\n")}`)
+        else add("info", `Agents:\n${props.agents.filter((entry) => entry.mode === "primary").map((entry) => `${entry.id === agent().id ? "*" : " "} ${entry.id} - ${entry.description}`).join("\n")}`)
         return
       case "plan":
       case "build":
@@ -273,6 +308,7 @@ export function App(props: AppProps) {
       case "new":
         activeSession = createSession(agent().id, model())
         setItems([])
+        setTodos([])
         await saveSession(activeSession)
         add("info", "Started a new session.")
         return
@@ -298,19 +334,49 @@ export function App(props: AppProps) {
         }
         activeSession = loaded
         setItems(itemFromMessages(loaded))
-        setAgent(findAgent(loaded.agent))
+        setAgent(findAgent(loaded.agent, props.agents))
         setModel(loaded.model || model())
         add("info", `Resumed ${loaded.id}`)
         return
       }
+      case "undo": {
+        const reverted = await undoLast(activeSession.id)
+        add("info", reverted ? `Reverted ${reverted}` : "Nothing to undo in this session.")
+        return
+      }
+      case "compact": {
+        if (busy()) return
+        setBusy(true)
+        add("info", "Compacting context...")
+        const compacted = await compactSession(activeSession, {
+          baseUrl: props.config.baseUrl,
+          apiKey: props.config.apiKey!,
+          model: model(),
+        }).catch(() => false)
+        setBusy(false)
+        if (compacted) await persist()
+        add("info", compacted ? "Context compacted." : "Not enough history to compact.")
+        return
+      }
+      case "commands":
+        add("info", props.commands.length ? props.commands.map((item) => `/${item.name}  ${item.description}`).join("\n") : "No custom commands. Add markdown files under .zelai/commands/.")
+        return
       case "login":
         add("info", "Run `zelai auth login` in another terminal, then restart ZelAI.")
         return
       case "logout":
         add("info", "Run `zelai auth logout` in another terminal.")
         return
-      default:
-        add("error", `Unknown command: /${name}. Try /help.`)
+      default: {
+        const custom = props.commands.find((item) => item.name === name)
+        if (!custom) {
+          add("error", `Unknown command: /${name}. Try /help.`)
+          return
+        }
+        if (custom.agent) setCurrentAgent(custom.agent)
+        if (custom.model) setCurrentModel(custom.model)
+        await run(expandCommand(custom, argument))
+      }
     }
   }
 
@@ -331,6 +397,11 @@ export function App(props: AppProps) {
     if (pending) {
       if (key.name === "y" || key.name === "return") {
         key.preventDefault?.()
+        pending.resolve(true)
+      }
+      if (key.name === "a") {
+        key.preventDefault?.()
+        always.add(pending.request.kind)
         pending.resolve(true)
       }
       if (key.name === "n" || key.name === "escape") {
@@ -420,6 +491,28 @@ export function App(props: AppProps) {
         </For>
       </scrollbox>
 
+      <Show when={todos().length}>
+        <box
+          flexShrink={0}
+          border={["top"]}
+          borderColor={BORDER}
+          paddingLeft={1}
+          paddingRight={1}
+          flexDirection="column"
+        >
+          <For each={todos().slice(0, 6)}>
+            {(todo) => (
+              <text wrapMode="word">
+                <span style={{ fg: todo.status === "completed" ? ACCENT : todo.status === "in_progress" ? YELLOW : MUTED }}>
+                  {todo.status === "completed" ? "[x] " : todo.status === "in_progress" ? "[~] " : todo.status === "cancelled" ? "[-] " : "[ ] "}
+                </span>
+                <span style={{ fg: todo.status === "completed" ? MUTED : TEXT }}>{todo.content}</span>
+              </text>
+            )}
+          </For>
+        </box>
+      </Show>
+
       <Show when={busy()}>
         <box height={1} paddingLeft={1} flexShrink={0}>
           <text fg={YELLOW}>
@@ -455,7 +548,7 @@ export function App(props: AppProps) {
               ? `${approval()!.request.detail.slice(0, 600)}...`
               : approval()!.request.detail}
           </text>
-          <text fg={MUTED}>[y] allow   [n] deny</text>
+          <text fg={MUTED}>[y] once   [a] always   [n] deny</text>
         </box>
       </Show>
 
@@ -486,7 +579,7 @@ export function App(props: AppProps) {
         <text fg={MUTED}>
           {agent().name} · {shortModel(model())}
         </text>
-        <text fg={MUTED}>{busy() ? "ctrl+c cancel" : "enter send · ctrl+c quit · /help"}</text>
+        <text fg={MUTED}>{busy() ? "ctrl+c cancel" : `enter · ^C quit · /help${todos().length ? ` · ${todos().filter((todo) => todo.status === "completed").length}/${todos().length}` : ""}`}</text>
       </box>
     </box>
   )

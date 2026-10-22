@@ -14,6 +14,8 @@ export interface RunOptions {
   json: boolean
   yolo: boolean
   cwd: string
+  instructions?: string
+  agents?: Agent[]
 }
 
 export async function runOnce(options: RunOptions) {
@@ -47,6 +49,10 @@ export async function runOnce(options: RunOptions) {
       cwd: options.cwd,
       approve,
       autoApprove: options.yolo,
+      permission: config.permission,
+      always: new Set(),
+      agents: options.agents,
+      instructions: options.instructions,
       onEvent: (event) => {
         if (event.type === "text") {
           wrote = true

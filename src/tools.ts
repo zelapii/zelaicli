@@ -2,9 +2,12 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import type { ToolDefinition } from "./api"
 import type { Agent } from "./agents"
+import { decisionFor, type PermissionConfig } from "./permissions"
+import { recordSnapshot } from "./undo"
+import type { Todo } from "./session"
 
 export interface ApprovalRequest {
-  kind: "write" | "edit" | "bash"
+  kind: "write" | "edit" | "bash" | "task"
   title: string
   detail: string
 }
@@ -13,9 +16,14 @@ export type Approve = (request: ApprovalRequest) => Promise<boolean>
 
 export interface ToolContext {
   cwd: string
+  sessionId: string
   approve: Approve
+  permission?: PermissionConfig
+  always?: Set<string>
   signal?: AbortSignal
   autoApprove?: boolean
+  runSubagent?: (agent: string, prompt: string) => Promise<string>
+  onTodos?: (todos: Todo[]) => void
 }
 
 export interface ToolResult {
@@ -37,6 +45,10 @@ function resolve(context: ToolContext, file: string) {
 
 async function approved(context: ToolContext, request: ApprovalRequest) {
   if (context.autoApprove) return true
+  const decision = decisionFor(context.permission, request.kind, request.kind === "bash" ? request.detail : request.title)
+  if (decision === "allow") return true
+  if (decision === "deny") return false
+  if (context.always?.has(request.kind)) return true
   return context.approve(request)
 }
 
@@ -154,11 +166,76 @@ const listTool: ToolDefinition = {
   },
 }
 
+const todoTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "todowrite",
+    description: "Replace the session todo list. Use for multi-step work.",
+    parameters: {
+      type: "object",
+      properties: {
+        todos: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              content: { type: "string" },
+              status: { type: "string", enum: ["pending", "in_progress", "completed", "cancelled"] },
+              priority: { type: "string", enum: ["high", "medium", "low"] },
+            },
+            required: ["content", "status"],
+          },
+        },
+      },
+      required: ["todos"],
+    },
+  },
+}
+
+const taskTool: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "task",
+    description:
+      "Delegate a focused task to a subagent. The subagent works in the same directory and returns a compact result.",
+    parameters: {
+      type: "object",
+      properties: {
+        description: { type: "string", description: "Short label for the task" },
+        prompt: { type: "string", description: "Full instructions for the subagent" },
+        agent: { type: "string", description: "Subagent id, defaults to general" },
+      },
+      required: ["description", "prompt"],
+    },
+  },
+}
+
+const READONLY_TOOLS = [readTool, globTool, grepTool, listTool]
 const ALL_TOOLS = [readTool, writeTool, editTool, bashTool, globTool, grepTool, listTool]
 
 export function toolDefinitions(agent: Agent): ToolDefinition[] {
-  if (agent.tools === "all") return ALL_TOOLS
-  return [readTool, globTool, grepTool, listTool]
+  let list: ToolDefinition[]
+  if (agent.tools === "all") list = [...ALL_TOOLS]
+  else if (agent.tools === "readonly") list = [...READONLY_TOOLS]
+  else list = ALL_TOOLS.filter((tool) => agent.tools.includes(tool.function.name))
+  if (agent.mode === "primary") list.push(taskTool)
+  if (!list.some((tool) => tool.function.name === "todowrite")) list.push(todoTool)
+  return list
+}
+
+async function task(context: ToolContext, args: any): Promise<ToolResult> {
+  const agent = String(args.agent || "general")
+  const prompt = String(args.prompt || "")
+  if (!prompt.trim()) return { ok: false, output: "prompt must not be empty" }
+  const ok = await approved(context, {
+    kind: "task",
+    title: `Run ${agent} subagent`,
+    detail: `${args.description || "task"}\n\n${prompt.slice(0, 1200)}`,
+  })
+  if (!ok) return { ok: false, output: "Denied by the user." }
+  if (!context.runSubagent) return { ok: false, output: "Subagents are not available in this mode." }
+  const output = await context.runSubagent(agent, prompt)
+  return { ok: true, output: truncate(output) }
 }
 
 async function read(context: ToolContext, args: any): Promise<ToolResult> {
@@ -184,8 +261,10 @@ async function write(context: ToolContext, args: any): Promise<ToolResult> {
     detail: `${content.length} characters\n\n${content.slice(0, 1200)}${content.length > 1200 ? "\n..." : ""}`,
   })
   if (!ok) return { ok: false, output: "Denied by the user." }
+  const before = await fs.readFile(file, "utf8").catch(() => null)
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.writeFile(file, content)
+  await recordSnapshot(context.sessionId, file, before)
   return { ok: true, output: `Wrote ${file} (${content.length} characters)` }
 }
 
@@ -208,6 +287,7 @@ async function edit(context: ToolContext, args: any): Promise<ToolResult> {
   if (!ok) return { ok: false, output: "Denied by the user." }
   const next = args.replace_all ? content.split(oldString).join(newString) : content.replace(oldString, newString)
   await fs.writeFile(file, next)
+  await recordSnapshot(context.sessionId, file, content)
   return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})` }
 }
 
@@ -314,6 +394,8 @@ export async function executeTool(name: string, rawArgs: string, context: ToolCo
         return await grep(context, args)
       case "list":
         return await list(context, args)
+      case "task":
+        return await task(context, args)
       default:
         return { ok: false, output: `Unknown tool: ${name}` }
     }

@@ -2,7 +2,7 @@
 
 Terminal coding agent for [ZelAI](https://ai.zelai.qzz.io), built with Bun, TypeScript, and OpenTUI.
 
-ZelAI keeps the workflow people expect from a modern coding agent — an interactive TUI, plan/build/review agents, tool use, sessions, and a single model gateway — while the implementation here is its own codebase.
+ZelAI keeps the workflow people expect from a modern coding agent — an interactive TUI, plan/build/review agents, subagents, todos, permissions, undo, custom commands, sessions, and a single model gateway — while the implementation here is its own codebase.
 
 ## Install
 
@@ -42,6 +42,13 @@ zelai review                   # review the current diff
 zelai agent review             # named agent
 zelai models                   # list models
 zelai sessions                 # list saved sessions
+zelai session show <id>        # print a saved session
+zelai session export <id> [f]  # export markdown
+zelai session import <file>    # import session json
+zelai session delete <id>      # delete a session
+zelai commands                 # list custom commands
+zelai undo [session]           # revert the last file change
+zelai compact [session]        # summarize older context
 ```
 
 Inside the TUI:
@@ -49,27 +56,56 @@ Inside the TUI:
 - `/model [id]`, `/agent [name]`
 - `/plan`, `/build`, `/review`
 - `/new`, `/sessions`, `/resume <id>`
+- `/undo`, `/compact`, `/commands`
 - `/help`, `/quit`
 
-## Agents
+Writes and shell commands can be approved once or always. Todos from the model appear above the prompt.
 
-- **build** — read, write, edit, and run commands
-- **plan** — read-only investigation and plan output
-- **review** — read-only review of the current change
+## Permissions
 
-Writes and shell commands require approval in the TUI. `zelai run --yolo` auto-approves tools.
+Writes and shell commands require approval by default. Configure it in `~/.config/zelai/zelai.json` or `.zelai/zelai.json`:
+
+```json
+{
+  "model": "nemotron-3.5-lightning-free",
+  "agent": "build",
+  "instructions": ["CONTRIBUTING.md"],
+  "permission": {
+    "edit": "ask",
+    "bash": { "git status": "allow", "git *": "ask", "rm *": "deny" },
+    "task": "ask"
+  }
+}
+```
+
+`zelai run --yolo` auto-approves tools.
+
+## Project files
+
+- `AGENTS.md`, `.zelai/AGENTS.md` — project instructions
+- `.zelai/zelai.json` — project config, merged over global config
+- `.zelai/agent/*.md` — custom agents (frontmatter: `description`, `mode`, `tools`, `subagents`)
+- `.zelai/command/*.md` — custom slash commands; `$ARGUMENTS` is replaced with the typed text
+- Global equivalents live under `~/.config/zelai/`
+
+Agents can call `task` to delegate a focused job to a subagent and `todowrite` to maintain the visible todo list. Every write/edit is snapshotted so `/undo` can revert it.
 
 ## Layout
 
 ```
 src/
-  index.tsx    CLI entry and commands
-  tui/app.tsx  OpenTUI interface
-  engine.ts    streaming agent loop
-  api.ts       OpenAI-compatible client
-  tools.ts     read/write/edit/bash/glob/grep/list
-  agents.ts    agent prompts and tool policies
-  session.ts   local session store
-  auth.ts      device login
-  config.ts    config and account state
+  index.tsx       CLI entry and commands
+  tui/app.tsx     OpenTUI interface
+  engine.ts       streaming agent loop
+  api.ts          OpenAI-compatible client with retries
+  tools.ts        read/write/edit/bash/glob/grep/list/task/todowrite
+  agents.ts       agent prompts, custom agents, subagents
+  session.ts      local session store, export/import
+  permissions.ts  allow/ask/deny rules with bash patterns
+  undo.ts         file snapshots per session
+  commands.ts     custom slash commands
+  instructions.ts AGENTS.md loader
+  compact.ts      context compaction
+  config.ts       config and account state
+  auth.ts         device login
 ```

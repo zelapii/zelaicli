@@ -8,6 +8,8 @@ export interface Config {
   apiKey?: string
   model?: string
   agent?: string
+  permission?: import("./permissions").PermissionConfig
+  instructions?: string[]
 }
 
 export interface Account {
@@ -81,4 +83,19 @@ export function maskKey(key: string | undefined) {
 
 export function apiKey(config: Config) {
   return config.apiKey || process.env.ZELAI_API_KEY
+}
+
+export function mergeConfig(base: Config, project: Partial<Config>): Config {
+  return {
+    ...base,
+    ...project,
+    version: 1,
+    baseUrl: normalizeBaseUrl(project.baseUrl || base.baseUrl),
+    permission: {
+      ...(base.permission || {}),
+      ...(project.permission || {}),
+    },
+    instructions: [...(base.instructions || []), ...(project.instructions || [])],
+    apiKey: base.apiKey,
+  }
 }
