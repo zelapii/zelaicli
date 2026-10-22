@@ -2,7 +2,8 @@ import { runTurn } from "./engine"
 import type { Agent } from "./agents"
 import type { Config } from "./config"
 import type { Session } from "./session"
-import { saveSession } from "./session"
+import { commitRevert, saveSession } from "./session"
+import { recordTurnStart } from "./undo"
 import type { ApprovalRequest } from "./tools"
 import type { McpManager } from "./mcp"
 import type { Skill } from "./skills"
@@ -30,6 +31,8 @@ export async function runOnce(options: RunOptions) {
   const { config, session, agent, model, message } = options
   session.agent = agent.id
   session.model = model
+  commitRevert(session)
+  await recordTurnStart(session.id)
   session.messages.push({ role: "user", content: message })
   await saveSession(session)
 

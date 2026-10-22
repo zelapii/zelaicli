@@ -24,10 +24,12 @@ import {
   latestSession,
   listSessions,
   loadSession,
+  revertLastUser,
   saveSession,
+  unrevert,
   type Session,
 } from "./session"
-import { redoLast, undoLast } from "./undo"
+import { redoLastTurn, undoLastTurn } from "./undo"
 import { loadSkills } from "./skills"
 import { loadThemes } from "./theme"
 import { PluginManager } from "./plugins"
@@ -168,15 +170,18 @@ Usage:
   zelai session export <id> [f]  export a session as markdown
   zelai session import <file>    import a session json file
   zelai session delete <id>      delete a session
-  zelai session fork <id> [t]    fork a session with a new title
+  zelai session fork <id> [t] --at <n>
+                                  fork a session (optionally stop at message n)
+  zelai session revert <id> [n]  revert the last n user turns
+  zelai session unrevert <id>    cancel the last revert
   zelai resume [id]               continue a session (latest when omitted)
   zelai completion bash|zsh|fish  print shell completion
   zelai commands                 list custom commands
   zelai mcp                      list configured MCP servers and tools
   zelai mcp add <name> <cmd|url> add an MCP server to config
   zelai mcp remove <name>        remove an MCP server
-  zelai undo [session]           revert the last file change
-  zelai redo [session]           redo the last undone change
+  zelai undo [session]           undo the last turn (files, messages, prompt)
+  zelai redo [session]           redo the last undone turn
   zelai init                     create or update AGENTS.md
   zelai stats                    show local session statistics
   zelai skills                   list global and project skills
@@ -348,8 +353,43 @@ async function sessionCommand(action: string, args: string[]) {
       process.stderr.write("Session not found.\n")
       process.exit(1)
     }
-    const forked = await forkSession(session, args.slice(1).join(" ") || undefined)
+    const rest = args.slice(1)
+    let at: number | undefined
+    const atIndex = rest.indexOf("--at")
+    if (atIndex >= 0) {
+      const value = Number(rest[atIndex + 1])
+      if (Number.isFinite(value)) at = value
+      rest.splice(atIndex, 2)
+    }
+    const forked = await forkSession(session, rest.join(" ") || undefined, at)
     process.stdout.write(`Forked ${session.id} to ${forked.id}\n`)
+    return
+  }
+  if (action === "revert" || action === "unrevert") {
+    const id = args[0]
+    const session = id ? await loadSession(id) : await latestSession()
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    if (action === "unrevert") {
+      if (!unrevert(session)) {
+        process.stderr.write("Nothing to unrevert in this session.\n")
+        process.exit(1)
+      }
+      await saveSession(session)
+      process.stdout.write(`Restored ${session.messages.length} messages in ${session.id}\n`)
+      return
+    }
+    const turns = Number(args[1] || 1)
+    const result = revertLastUser(session, Number.isFinite(turns) && turns > 0 ? turns : 1)
+    if (!result) {
+      process.stderr.write("Nothing to revert in this session.\n")
+      process.exit(1)
+    }
+    await saveSession(session)
+    process.stdout.write(`Reverted ${result.count} messages in ${session.id}\n`)
+    if (result.prompt) process.stdout.write(`Restored prompt: ${result.prompt}\n`)
     return
   }
   if (action === "rename") {
@@ -731,12 +771,15 @@ You are the ${name} agent. Be concise and focused.
       process.stderr.write("Session not found.\n")
       process.exit(1)
     }
-    const redone = await redoLast(session.id)
-    if (!redone) {
+    const files = await redoLastTurn(session.id)
+    const restored = unrevert(session)
+    if (!files.length && !restored) {
       process.stderr.write("Nothing to redo in this session.\n")
       process.exit(1)
     }
-    process.stdout.write(`Redid ${redone}\n`)
+    if (restored) await saveSession(session)
+    process.stdout.write(`Redid ${files.length} file${files.length === 1 ? "" : "s"}${restored ? " and messages" : ""}\n`)
+    for (const file of files) process.stdout.write(`  ${file}\n`)
     return
   }
 
@@ -757,12 +800,18 @@ You are the ${name} agent. Be concise and focused.
       process.stderr.write("Session not found.\n")
       process.exit(1)
     }
-    const reverted = await undoLast(session.id)
-    if (!reverted) {
+    const conversation = revertLastUser(session)
+    const files = await undoLastTurn(session.id)
+    if (!conversation && !files.length) {
       process.stderr.write("Nothing to undo in this session.\n")
       process.exit(1)
     }
-    process.stdout.write(`Reverted ${reverted}\n`)
+    if (conversation) await saveSession(session)
+    process.stdout.write(`Reverted ${files.length} file${files.length === 1 ? "" : "s"}`)
+    if (conversation) process.stdout.write(` and ${conversation.count} messages`)
+    process.stdout.write("\n")
+    for (const file of files) process.stdout.write(`  ${file}\n`)
+    if (conversation?.prompt) process.stdout.write(`Restored prompt: ${conversation.prompt}\n`)
     return
   }
 

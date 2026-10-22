@@ -51,6 +51,9 @@ zelai session export <id> [f]  # export markdown
 zelai session import <file>    # import session json
 zelai session delete <id>      # delete a session
 zelai session fork <id> "name" # fork a session
+zelai session fork <id> --at 4  # fork only the first 4 messages
+zelai session revert <id> [n]  # revert the last n user turns
+zelai session unrevert <id>    # cancel the last revert
 zelai session rename <id> "t" # rename a session
 zelai completion zsh           # print shell completion
 zelai commands                 # list custom commands
@@ -69,8 +72,8 @@ zelai serve --port 4096        # local HTTP/SSE server
 zelai attach http://127.0.0.1:4096 "hello"  # prompt a running server
 zelai mcp                      # list MCP servers and tools
 zelai mcp add docs <cmd|url>   # add an MCP server to config
-zelai undo [session]           # revert the last file change
-zelai redo [session]           # redo the last undone change
+zelai undo [session]           # undo the last turn (files, messages, prompt)
+zelai redo [session]           # redo the last undone turn
 zelai init                     # create or update AGENTS.md
 zelai stats                    # session, tool, and token statistics
 zelai compact [session]        # summarize older context
@@ -86,13 +89,14 @@ Inside the TUI:
 
 - `/model [id]`, `/agent [name]`, `/plan`, `/build`, `/review`
 - `/new`, `/sessions`, `/resume <id>`, `/rename <title>`, `/delete`
-- `/undo`, `/redo`, `/compact`, `/details`, `/init`
+- `/undo`, `/redo`, `/revert [n]`, `/unrevert`, `/fork [title]`, `/compact`, `/details`, `/init`
 - `/commands`, `/skills`, `/mcp`, `/help`, `/quit`
 - `/theme [name]`, `/keybinds`, `/plugins`, `/lsp`
 - `/git status|diff|log|commit`, `/status` (session + git), `/diff`, `/commit <msg>`
 - `/editor` composes the prompt in `$VISUAL`/`$EDITOR`; `/export` writes the session to `~/.local/share/zelai/exports/`; `/thinking` toggles reasoning blocks
 - `ctrl+p` opens the command palette (slash commands and custom commands)
-- `@path` completes project files; aliases from `references` complete as `@alias/...`; Tab inserts the highlighted file
+- `@path` completes project files; aliases from `references` complete as `@alias/...`; add `#10-20` to attach only those lines; Tab inserts the highlighted file
+- `/undo` reverts the files and messages of the last turn and restores the prompt; `/redo` reverses it
 - `/` completes slash commands; Tab inserts the highlighted command
 - `/model`, `/agent`, and `/sessions` open a picker (up/down, enter, esc)
 - Up and down arrow walk through prompt history
@@ -141,7 +145,7 @@ Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `
 
 Both config files accept JSONC (comments and trailing commas). Built-in agents are `build`, `plan`, `review`, plus `explore`, `scout`, and `general` subagents.
 
-Agents can call `task` to delegate a focused job to a subagent and `todowrite` to maintain the visible todo list. Every write/edit is snapshotted so `/undo` and `/redo` can move file changes forward and back.
+Agents can call `task` to delegate a focused job to a subagent and `todowrite` to maintain the visible todo list. Every write/edit is snapshotted per turn, so `/undo` reverts the last turn's files and messages and restores the prompt, while `/redo` reverses it. `/revert` and `/unrevert` move messages without touching files.
 
 ## Tools
 
@@ -201,11 +205,14 @@ Keybinds can be overridden globally or per project:
     "help_show": ["f1"],
     "session_new": ["ctrl+n"]
   },
-  "tui": { "mouse": true }
+  "tui": {
+    "mouse": true,
+    "cursor": { "style": "block", "blinking": true }
+  }
 }
 ```
 
-Set `tui.mouse` to `true` to enable mouse clicks and scrolling in the TUI (off by default).
+Set `tui.mouse` to `true` to enable mouse clicks and scrolling (off by default). `tui.cursor.style` accepts `block`, `line`, `underline`, or `default`; `tui.cursor.blinking` toggles the blink.
 
 Named roots make files outside the project addressable from the prompt:
 
@@ -281,6 +288,8 @@ Custom tool names are exposed directly to the model. Tool hooks are `tool.execut
 - `GET /sessions/:id`, `DELETE /sessions/:id`, `GET /sessions/:id/messages`
 - `POST /sessions/:id/prompt` with SSE events and optional `autoApprove`
 - `POST /sessions/:id/cancel`, `POST /permissions/:id`
+- `POST /sessions/:id/revert` `{ "turns": 1 }`, `POST /sessions/:id/unrevert`
+- `POST /sessions/:id/fork` `{ "title", "at" }`, `GET /sessions/status`
 
 Set `server.password` in `zelai.json`, pass `--password`, or export `ZELAI_SERVER_PASSWORD` to require Basic or Bearer auth on every route except `/health`. A non-loopback `--host` is refused without a password unless `--insecure` is passed. CORS is disabled by default; enable specific origins with `--cors http://localhost:3000` or allow all with `--cors "*"`.
 

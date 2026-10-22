@@ -11,6 +11,12 @@ export interface Todo {
   priority?: "high" | "medium" | "low"
 }
 
+export interface RevertState {
+  at: number
+  messages: ChatMessage[]
+  prompt?: string
+}
+
 export interface Session {
   id: string
   title: string
@@ -22,6 +28,38 @@ export interface Session {
   summary?: string
   todos?: Todo[]
   tokens?: { prompt: number; completion: number }
+  revert?: RevertState
+}
+
+export function visibleMessages(session: Session) {
+  return session.revert ? session.messages.slice(0, session.revert.at) : session.messages
+}
+
+export function revertLastUser(session: Session, turns = 1) {
+  const messages = visibleMessages(session)
+  const indexes: number[] = []
+  messages.forEach((message, index) => {
+    if (message.role === "user") indexes.push(index)
+  })
+  if (!indexes.length) return undefined
+  const target = indexes[Math.max(0, indexes.length - Math.max(1, turns))]
+  const prompt = typeof messages[target].content === "string" ? messages[target].content : undefined
+  const removed = messages.slice(target)
+  session.revert = { at: target, messages: removed, prompt }
+  return { prompt, count: removed.length }
+}
+
+export function unrevert(session: Session) {
+  if (!session.revert) return false
+  delete session.revert
+  return true
+}
+
+export function commitRevert(session: Session) {
+  if (!session.revert) return false
+  session.messages = session.messages.slice(0, session.revert.at)
+  delete session.revert
+  return true
 }
 
 function fileFor(id: string) {
@@ -91,12 +129,15 @@ export async function latestSession(): Promise<Session | undefined> {
   return (await listSessions())[0]
 }
 
-export async function forkSession(session: Session, title?: string) {
+export async function forkSession(session: Session, title?: string, keep?: number) {
   const copy = JSON.parse(JSON.stringify(session)) as Session
+  const messages = visibleMessages(session)
   copy.id = newId()
+  copy.messages = keep === undefined ? messages : messages.slice(0, Math.max(0, keep))
   copy.title = title || `${session.title} (fork)`
   copy.createdAt = Date.now()
   copy.updatedAt = Date.now()
+  delete copy.revert
   await saveSession(copy)
   return copy
 }
@@ -109,7 +150,7 @@ export async function deleteSession(id: string) {
 export function exportMarkdown(session: Session) {
   const lines = [`# ${session.title}`, '', `- id: ${session.id}`, `- agent: ${session.agent}`, `- model: ${session.model}`, `- updated: ${new Date(session.updatedAt).toISOString()}`, '']
   if (session.summary) lines.push('## Summary', '', session.summary, '')
-  for (const message of session.messages) {
+  for (const message of visibleMessages(session)) {
     if (message.role === 'user') lines.push('## User', '', message.content || '', '')
     if (message.role === 'assistant') {
       lines.push('## Assistant', '', message.content || '', '')

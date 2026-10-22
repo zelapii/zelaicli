@@ -1,7 +1,7 @@
 import { chat, type ChatMessage, type ToolCall } from "./api"
 import { AGENTS, agentContext, findAgent, type Agent } from "./agents"
 import { executeTool, toolDefinitions, type Approve } from "./tools"
-import { createSession, type Session, type Todo } from "./session"
+import { createSession, visibleMessages, type Session, type Todo } from "./session"
 import type { McpManager } from "./mcp"
 import { mergePermission } from "./permissions"
 import { skillSummary, type Skill } from "./skills"
@@ -120,7 +120,7 @@ export async function runTurn(options: RunTurnOptions) {
       model: options.model,
       temperature: options.agent.temperature,
       top_p: options.agent.topP,
-      messages: toApiMessages(system, options.session.messages),
+      messages: toApiMessages(system, visibleMessages(options.session)),
       tools,
       signal: options.signal,
       onText: (text) => options.onEvent({ type: "text", text }),

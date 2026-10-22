@@ -95,7 +95,7 @@ Aturan:
 - [x] Footer token/context
 - [x] Panel todo dan dialog `question`
 - [x] Preview diff setelah edit
-- [x] Slash: `/new`, `/sessions`, `/resume`, `/model`, `/agent`, `/plan`, `/build`, `/review`, `/compact`, `/undo`, `/redo`, `/details`, `/theme`, `/keybinds`, `/plugins`, `/lsp`, `/git`, `/status`, `/rename`, `/delete`, `/diff`, `/commit`, `/skills`, `/init`, `/commands`, `/mcp`, `/login`, `/logout`, `/help`, `/quit`
+- [x] Slash: `/new`, `/sessions`, `/resume`, `/model`, `/agent`, `/plan`, `/build`, `/review`, `/compact`, `/undo`, `/redo`, `/revert`, `/unrevert`, `/fork`, `/details`, `/theme`, `/keybinds`, `/plugins`, `/lsp`, `/git`, `/status`, `/rename`, `/delete`, `/diff`, `/commit`, `/skills`, `/init`, `/commands`, `/mcp`, `/login`, `/logout`, `/help`, `/quit`
 - [ ] `/connect` untuk menambah provider
 - [x] `/editor` menyusun pesan dengan `$EDITOR`/`$VISUAL` (suspend/resume renderer)
 - [x] `/export` menulis Markdown sesi ke `~/.local/share/zelai/exports/`
@@ -104,11 +104,12 @@ Aturan:
 - [ ] Image paste/drag di prompt
 - [ ] Notifikasi desktop dan suara (`attention`)
 - [ ] `diff_style` auto/stacked (config `tui.diffStyle` sudah ada, render belum)
-- [~] Config mouse (`tui.mouse` sudah terhubung), cursor/blinking, scroll speed/acceleration
+- [x] Config `tui.mouse` dan `tui.cursor` (`style`, `blinking`)
+- [ ] Config scroll speed/acceleration
 - [ ] Leader key (default `ctrl+x`) dan keymap penuh v2 (`app.exit`, `command.palette.show`, `<leader>`)
 - [ ] Toggle tampilan username
 - [ ] Tab sesi dan shell mode `!`
-- [ ] Referensi `@file#20-45` (rentang baris)
+- [x] Referensi `@file#20-45` (rentang baris)
 - [ ] `/btw` pertanyaan sampingan dan `/highlights`
 - [ ] Mode mini dan settings dialog
 - [ ] Navigasi session child/tab
@@ -124,19 +125,19 @@ Aturan:
 - [x] Auto title dari pesan pertama
 - [x] Token usage per sesi dan `stats`
 - [x] Undo/redo berbasis snapshot
-- [ ] Snapshot v2: `/undo` rollback percakapan + file (scope git worktree, untracked ≤2MiB) dan mengembalikan prompt ke composer; `/redo` membatalkan undo
+- [~] Snapshot v2: `/undo` rollback file + percakapan per turn dan mengembalikan prompt; `/redo` membatalkan undo. Belum: scope git worktree dan batas untracked ≤2MiB
 - [x] Compaction manual dan otomatis
 - [ ] Compaction v2: `compaction.auto`, `keep.tokens` (default 15000), pemicu manual via API, event `session.compaction.*`
 - [ ] Attachment v2: `{uri,name,description}` dengan `file:`/`data:` URL, rentang baris, 20MiB
 - [x] `zelai init` menulis `AGENTS.md`
 - [ ] Backend SQLite + migrasi (`zelai db`)
-- [ ] Status sesi berjalan (endpoint/daftar)
+- [~] Status sesi berjalan: `GET /sessions/status`; belum ada perintah CLI/TUI
 - [ ] Child session untuk subagent
-- [ ] Fork pada message tertentu
-- [ ] Revert/unrevert per message
+- [~] Fork pada message tertentu: `session fork --at <n>` dan `POST /sessions/:id/fork`; TUI masih fork seluruh percakapan
+- [~] Revert/unrevert: `/revert [n]`, `/unrevert`, `session revert/unrevert`, endpoint server; per-turn, belum per pesan tunggal
 - [ ] Diff per message dan per sesi (API + TUI)
 - [ ] Ringkasan sesi via agent (selain compaction)
-- [ ] `/export` membuka `$EDITOR`
+- [x] `/export` membuka `$EDITOR`
 - [ ] Biaya per sesi/model (cost), bukan hanya token
 - [ ] Filter `stats` per hari/model/project
 
@@ -333,7 +334,7 @@ Aturan:
 | Batch | Isi | Milestone |
 |---|---|---|
 | 7 | `/editor`, `/export`, `/thinking`, command palette, references, permission wildcard, `tui.mouse` (**selesai, menunggu uji TUI**) | M2, M4, M5 |
-| 8 | Snapshot v2 (`/undo` file + prompt, `/redo`), revert/unrevert, fork per message, diff sesi, child session, status, cost | M3 |
+| 8 | Snapshot v2 (`/undo` file + prompt, `/redo`), revert/unrevert, fork per message, diff sesi, child session, status, cost — **sebagian: undo turn, revert/unrevert, fork `--at`, status endpoint** | M3 |
 | 9 | API parity, background service + `zelai api`, `--standalone`, event bus, TUI control, OpenAPI SDK, SDK embedded + client HTTP, contract test | M7 |
 | 10 | Multi-provider, OAuth, varian `#high`, provider lokal, `providers` config, warming, websearch multi-provider, model kecil, `/connect` | M6 |
 | 11 | MCP v2/OAuth, plugin v2 + plugin TUI, skills compat, schema config/permission list, policies | M4, M5 |

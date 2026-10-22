@@ -113,19 +113,44 @@ async function readFile(cwd: string, file: string) {
   return readAbsolute(path.resolve(cwd, file))
 }
 
-async function readReference(token: string, cwd: string, references?: Record<string, string>) {
+function sliceLines(content: string, range: string) {
+  const match = /^(\d+)(?:-(\d+))?$/.exec(range)
+  if (!match) return content
+  const start = Math.max(1, Number(match[1]))
+  const end = match[2] ? Math.max(start, Number(match[2])) : start
+  const lines = content.split("\n")
+  if (start > lines.length) return ""
+  return lines.slice(start - 1, end).join("\n")
+}
+
+function splitRange(token: string) {
+  const hash = token.lastIndexOf("#")
+  if (hash <= 0) return { token, range: undefined as string | undefined }
+  const range = token.slice(hash + 1)
+  if (!/^\d+(-\d+)?$/.test(range)) return { token, range: undefined }
+  return { token: token.slice(0, hash), range }
+}
+
+async function readReference(raw: string, cwd: string, references?: Record<string, string>) {
+  const { token, range } = splitRange(raw)
   const resolved = resolveAlias(token, cwd, references)
-  if (!resolved) return readFile(cwd, token)
-  if (!resolved.file) {
-    const listing = await listFilesAt(resolved.root)
-    if (!listing.length) return undefined
-    const clipped = listing.slice(0, 200)
-    return clipped.join("\n") + (listing.length > clipped.length ? `\n... ${listing.length - clipped.length} more files` : "")
-  }
-  const absolute = path.resolve(resolved.root, resolved.file)
-  const relative = path.relative(resolved.root, absolute)
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined
-  return readAbsolute(absolute)
+  const content = !resolved
+    ? await readFile(cwd, token)
+    : !resolved.file
+      ? await (async () => {
+          const listing = await listFilesAt(resolved.root)
+          if (!listing.length) return undefined
+          const clipped = listing.slice(0, 200)
+          return clipped.join("\n") + (listing.length > clipped.length ? `\n... ${listing.length - clipped.length} more files` : "")
+        })()
+      : await (async () => {
+          const absolute = path.resolve(resolved.root, resolved.file)
+          const relative = path.relative(resolved.root, absolute)
+          if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined
+          return readAbsolute(absolute)
+        })()
+  if (content === undefined) return undefined
+  return range ? sliceLines(content, range) : content
 }
 
 export function formatAttachments(entries: { path: string; content: string }[]) {

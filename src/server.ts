@@ -7,7 +7,20 @@ import { loadInstructions } from "./instructions"
 import { createMcpManager, type McpManager } from "./mcp"
 import { defaultModel, models } from "./models"
 import { VERSION } from "./paths"
-import { createSession, deleteSession, listSessions, loadSession, saveSession, type Session } from "./session"
+import {
+  commitRevert,
+  createSession,
+  deleteSession,
+  forkSession,
+  listSessions,
+  loadSession,
+  revertLastUser,
+  saveSession,
+  unrevert,
+  visibleMessages,
+  type Session,
+} from "./session"
+import { recordTurnStart } from "./undo"
 import { loadSkills, type Skill } from "./skills"
 import { PluginManager } from "./plugins"
 import { LspManager } from "./lsp"
@@ -194,6 +207,40 @@ function openApiDoc() {
       "/sessions/{id}/cancel": {
         post: { summary: "Cancel a running prompt", parameters: [idParam], responses: { "200": { description: "OK" }, "404": { description: "Not running" } } },
       },
+      "/sessions/{id}/revert": {
+        post: {
+          summary: "Revert the last user turn",
+          parameters: [idParam],
+          requestBody: {
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { turns: { type: "number" } } },
+              },
+            },
+          },
+          responses: { "200": { description: "OK" }, "404": { description: "Not found" } },
+        },
+      },
+      "/sessions/{id}/unrevert": {
+        post: { summary: "Cancel a revert", parameters: [idParam], responses: { "200": { description: "OK" }, "404": { description: "Not found" } } },
+      },
+      "/sessions/{id}/fork": {
+        post: {
+          summary: "Fork a session up to a message",
+          parameters: [idParam],
+          requestBody: {
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { title: { type: "string" }, at: { type: "number" } } },
+              },
+            },
+          },
+          responses: { "201": { description: "Created" }, "404": { description: "Not found" } },
+        },
+      },
+      "/sessions/status": {
+        get: { summary: "Running sessions", responses: { "200": { description: "OK" } } },
+      },
       "/permissions/{id}": {
         post: {
           summary: "Answer a permission request",
@@ -312,6 +359,13 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
         return json({ session }, 201, headers)
       }
 
+      if (url.pathname === "/sessions/status" && request.method === "GET") {
+        const running = [...state.running.entries()]
+          .filter(([, entry]) => entry.active)
+          .map(([id]) => id)
+        return json({ running }, 200, headers)
+      }
+
       const sessionMatch = url.pathname.match(/^\/sessions\/([^/]+)$/)
       if (sessionMatch && request.method === "GET") {
         const session = await loadSession(decodeURIComponent(sessionMatch[1]))
@@ -330,7 +384,37 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
       if (messagesMatch && request.method === "GET") {
         const session = await loadSession(decodeURIComponent(messagesMatch[1]))
         if (!session) return json({ error: "Session not found" }, 404, headers)
-        return json({ messages: session.messages }, 200, headers)
+        return json({ messages: visibleMessages(session) }, 200, headers)
+      }
+
+      const revertMatch = url.pathname.match(/^\/sessions\/([^/]+)\/revert$/)
+      if (revertMatch && request.method === "POST") {
+        const session = await loadSession(decodeURIComponent(revertMatch[1]))
+        if (!session) return json({ error: "Session not found" }, 404, headers)
+        if (state.running.get(session.id)?.active) return json({ error: "Session is busy" }, 409, headers)
+        const input = await body<{ turns?: number }>(request)
+        const result = revertLastUser(session, Number(input?.turns) || 1)
+        if (!result) return json({ error: "Nothing to revert" }, 400, headers)
+        await saveSession(session)
+        return json({ reverted: result.count, prompt: result.prompt }, 200, headers)
+      }
+
+      const unrevertMatch = url.pathname.match(/^\/sessions\/([^/]+)\/unrevert$/)
+      if (unrevertMatch && request.method === "POST") {
+        const session = await loadSession(decodeURIComponent(unrevertMatch[1]))
+        if (!session) return json({ error: "Session not found" }, 404, headers)
+        if (!unrevert(session)) return json({ error: "Nothing to unrevert" }, 400, headers)
+        await saveSession(session)
+        return json({ ok: true, messages: visibleMessages(session) }, 200, headers)
+      }
+
+      const forkMatch = url.pathname.match(/^\/sessions\/([^/]+)\/fork$/)
+      if (forkMatch && request.method === "POST") {
+        const session = await loadSession(decodeURIComponent(forkMatch[1]))
+        if (!session) return json({ error: "Session not found" }, 404, headers)
+        const input = await body<{ title?: string; at?: number }>(request)
+        const forked = await forkSession(session, input?.title, Number.isFinite(input?.at) ? Number(input?.at) : undefined)
+        return json({ session: forked }, 201, headers)
       }
 
       const promptMatch = url.pathname.match(/^\/sessions\/([^/]+)\/prompt$/)
@@ -409,6 +493,8 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
             ;(async () => {
               let failed: string | undefined
               try {
+                commitRevert(session)
+                await recordTurnStart(session.id)
                 session.messages.push({ role: "user", content: message })
                 await saveSession(session)
                 await runTurn({

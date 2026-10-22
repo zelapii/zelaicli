@@ -1,19 +1,36 @@
 import path from "node:path"
 import { For, Show, createSignal, onMount } from "solid-js"
 import { useKeyboard, useRenderer } from "@opentui/solid"
-import { TextAttributes, type InputRenderable, type ScrollBoxRenderable } from "@opentui/core"
+import {
+  TextAttributes,
+  type CursorStyleOptions,
+  type InputRenderable,
+  type ScrollBoxRenderable,
+} from "@opentui/core"
 import type { Config } from "../config"
 import { saveConfig } from "../config"
 import type { ModelInfo } from "../models"
 import { findModel } from "../models"
 import { type Agent, findAgent, primaryAgents } from "../agents"
 import type { Session, Todo } from "../session"
-import { createSession, deleteSession, exportMarkdown, listSessions, loadSession, saveSession } from "../session"
+import {
+  commitRevert,
+  createSession,
+  deleteSession,
+  exportMarkdown,
+  forkSession,
+  listSessions,
+  loadSession,
+  revertLastUser,
+  saveSession,
+  unrevert,
+  visibleMessages,
+} from "../session"
 import type { CustomCommand } from "../commands"
 import type { McpManager } from "../mcp"
 import { expandCommand } from "../commands"
 import { compactSession, shouldCompact } from "../compact"
-import { redoLast, undoLast } from "../undo"
+import { recordTurnStart, redoLastTurn, undoLastTurn } from "../undo"
 import { runTurn, type EngineEvent, type QuestionRequest } from "../engine"
 import type { ApprovalRequest } from "../tools"
 import { dataDir, VERSION } from "../paths"
@@ -85,6 +102,9 @@ const SLASH_COMMANDS = [
   "resume",
   "undo",
   "redo",
+  "revert",
+  "unrevert",
+  "fork",
   "details",
   "editor",
   "export",
@@ -110,7 +130,7 @@ const nextId = () => `item-${++counter}`
 
 function itemFromMessages(session: Session): Item[] {
   const items: Item[] = []
-  for (const message of session.messages) {
+  for (const message of visibleMessages(session)) {
     if (message.role === "user" && message.content) {
       items.push({ id: nextId(), kind: "user", text: message.content })
     }
@@ -268,6 +288,15 @@ export function App(props: AppProps) {
     setTimeout(() => input?.focus(), 0)
   }
 
+  const cursorStyle = () => {
+    const cursor = props.config.tui?.cursor
+    if (!cursor) return undefined
+    const value: CursorStyleOptions = {}
+    if (cursor.style) value.style = cursor.style
+    if (cursor.blinking !== undefined) value.blinking = cursor.blinking
+    return value
+  }
+
   const withEditor = async <T,>(work: () => Promise<T>) => {
     await renderer.suspend()
     try {
@@ -346,6 +375,8 @@ export function App(props: AppProps) {
     if (prepared.agent) setCurrentAgent(prepared.agent)
     text = prepared.text || "Review the attached file."
     const currentAgent = agent()
+    commitRevert(activeSession)
+    await recordTurnStart(activeSession.id)
     add("user", display)
     activeSession.messages.push({ role: "user", content: text })
     activeSession.agent = currentAgent.id
@@ -418,6 +449,7 @@ export function App(props: AppProps) {
         .filter(Boolean)
         .join("\n")
       add("tool", code === 0 ? "shell" : "shell FAILED", output.length > 4000 ? `${output.slice(0, 4000)}\n...` : output)
+      commitRevert(activeSession)
       activeSession.messages.push({ role: "user", content: `Shell command: ${command}\n\n${output}` })
       await persist()
     } catch (error) {
@@ -482,8 +514,11 @@ export function App(props: AppProps) {
             "/rename <title> rename the current session",
             "/delete         delete the current session",
             "/resume <id>    load a session",
-            "/undo           revert the last file change",
-            "/redo           redo the last undone change",
+            "/undo           undo the last turn (files, messages, prompt)",
+            "/redo           redo the last undone turn",
+            "/revert [n]     revert the last n turns without touching files",
+            "/unrevert       restore the last reverted turns",
+            "/fork [title]   fork the visible conversation",
             "/details        toggle tool output details",
             "/editor         compose the prompt in $EDITOR",
             "/export         open this session in $EDITOR",
@@ -583,13 +618,76 @@ export function App(props: AppProps) {
         return
       }
       case "undo": {
-        const reverted = await undoLast(activeSession.id)
-        add("info", reverted ? `Reverted ${reverted}` : "Nothing to undo in this session.")
+        if (busy()) {
+          add("error", "Wait for the current turn to finish before undoing.")
+          return
+        }
+        const conversation = revertLastUser(activeSession)
+        const files = await undoLastTurn(activeSession.id)
+        if (!conversation && !files.length) {
+          add("info", "Nothing to undo in this session.")
+          return
+        }
+        await persist()
+        setItems(itemFromMessages(activeSession))
+        if (conversation) setPrompt(conversation.prompt || "")
+        const parts = [
+          files.length ? `${files.length} file${files.length === 1 ? "" : "s"}` : "",
+          conversation ? `${conversation.count} message${conversation.count === 1 ? "" : "s"}` : "",
+        ].filter(Boolean)
+        add("info", `Undid ${parts.join(" and ")}.${conversation ? " Prompt restored; /redo to cancel." : ""}`)
         return
       }
       case "redo": {
-        const redone = await redoLast(activeSession.id)
-        add("info", redone ? `Redid ${redone}` : "Nothing to redo in this session.")
+        if (busy()) {
+          add("error", "Wait for the current turn to finish before redoing.")
+          return
+        }
+        const files = await redoLastTurn(activeSession.id)
+        const restored = unrevert(activeSession)
+        if (!files.length && !restored) {
+          add("info", "Nothing to redo in this session.")
+          return
+        }
+        await persist()
+        setItems(itemFromMessages(activeSession))
+        const parts = [
+          files.length ? `${files.length} file${files.length === 1 ? "" : "s"}` : "",
+          restored ? "messages" : "",
+        ].filter(Boolean)
+        add("info", `Redid ${parts.join(" and ")}.`)
+        return
+      }
+      case "revert": {
+        if (busy()) {
+          add("error", "Wait for the current turn to finish before reverting.")
+          return
+        }
+        const turns = Number.parseInt(argument, 10)
+        const result = revertLastUser(activeSession, Number.isFinite(turns) && turns > 0 ? turns : 1)
+        if (!result) {
+          add("info", "Nothing to revert in this session.")
+          return
+        }
+        await persist()
+        setItems(itemFromMessages(activeSession))
+        setPrompt(result.prompt || "")
+        add("info", `Reverted ${result.count} messages. Prompt restored; /unrevert to undo.`)
+        return
+      }
+      case "unrevert": {
+        if (!unrevert(activeSession)) {
+          add("info", "Nothing to unrevert in this session.")
+          return
+        }
+        await persist()
+        setItems(itemFromMessages(activeSession))
+        add("info", "Restored the reverted messages.")
+        return
+      }
+      case "fork": {
+        const forked = await forkSession(activeSession, argument || undefined)
+        add("info", `Forked to ${forked.id} (${forked.messages.length} messages).`)
         return
       }
       case "details":
@@ -1227,6 +1325,7 @@ export function App(props: AppProps) {
           backgroundColor={palette().panel}
           textColor={palette().text}
           cursorColor={palette().accent}
+          cursorStyle={cursorStyle()}
           onInput={(value: string) => {
             setDraft(value)
             updateHints(value)
