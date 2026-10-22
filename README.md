@@ -4,6 +4,8 @@ Terminal coding agent for [ZelAI](https://ai.zelai.qzz.io), built with Bun, Type
 
 ZelAI keeps the workflow people expect from a modern coding agent — an interactive TUI, plan/build/review agents, subagents, todos, permissions, undo, custom commands, sessions, and a single model gateway — while the implementation here is its own codebase.
 
+The opencode parity roadmap and upcoming features are tracked in [FITUR.md](FITUR.md).
+
 ## Install
 
 ```sh
