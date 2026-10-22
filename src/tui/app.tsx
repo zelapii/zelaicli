@@ -128,6 +128,12 @@ function itemFromMessages(session: Session): Item[] {
   return items
 }
 
+function formatTokens(value: number) {
+  if (!value) return "0"
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+  return String(value)
+}
+
 function shortModel(model: string) {
   const id = model.includes("/") ? model.split("/").pop()! : model
   return id.length > 28 ? `${id.slice(0, 27)}…` : id
@@ -157,6 +163,7 @@ export function App(props: AppProps) {
   const [hints, setHints] = createSignal<string[]>([])
   const [hintIndex, setHintIndex] = createSignal(0)
   const [picker, setPicker] = createSignal<PickerState | undefined>()
+  const [usage, setUsage] = createSignal<{ prompt: number; completion: number }>()
   const [pickerIndex, setPickerIndex] = createSignal(0)
   const history: string[] = []
   let historyIndex = -1
@@ -254,6 +261,10 @@ export function App(props: AppProps) {
 
   const event = (value: EngineEvent) => {
     if (renderer.isDestroyed) return
+    if (value.type === "usage") {
+      setUsage({ prompt: value.prompt, completion: value.completion })
+      return
+    }
     if (value.type === "assistant_start") {
       currentAssistant = add("assistant", "")
       return
@@ -1101,6 +1112,7 @@ export function App(props: AppProps) {
       <box height={1} flexShrink={0} paddingLeft={1} paddingRight={1} justifyContent="space-between" flexDirection="row">
         <text fg={palette().muted}>
           {agent().name} · {shortModel(currentModel())}
+          {usage() ? ` · ctx ${formatTokens(usage()!.prompt)}` : ""}
         </text>
         <text fg={palette().muted}>{busy() ? "ctrl+c cancel" : `enter · ^C quit · /help${todos().length ? ` · ${todos().filter((todo) => todo.status === "completed").length}/${todos().length}` : ""}`}</text>
       </box>

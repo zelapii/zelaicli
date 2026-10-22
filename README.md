@@ -70,6 +70,10 @@ zelai redo [session]           # redo the last undone change
 zelai init                     # create or update AGENTS.md
 zelai stats                    # session and tool statistics
 zelai compact [session]        # summarize older context
+zelai resume                   # continue the latest session (TUI)
+zelai resume <id>              # continue a specific session
+zelai resume -m "next step"    # continue latest and run one prompt
+zelai run --debug "hi"         # log model requests to stderr
 zelai --fork -c                # fork the latest session
 zelai run -f src/app.ts "review this file"
 ```
@@ -86,6 +90,7 @@ Inside the TUI:
 - `/` completes slash commands; Tab inserts the highlighted command
 - `/model`, `/agent`, and `/sessions` open a picker (up/down, enter, esc)
 - Up and down arrow walk through prompt history
+- The footer shows the agent, model, and last request context tokens
 - `@agent` switches agent for one prompt
 - `!command` runs a shell command and adds the output to the conversation
 - Tab with an empty prompt cycles primary agents

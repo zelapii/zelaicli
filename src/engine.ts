@@ -16,6 +16,7 @@ export type EngineEvent =
   | { type: "step"; step: number }
   | { type: "todos"; todos: Todo[] }
   | { type: "error"; message: string }
+  | { type: "usage"; prompt: number; completion: number }
 
 export interface RunTurnOptions {
   session: Session
@@ -127,6 +128,13 @@ export async function runTurn(options: RunTurnOptions) {
       ...(result.toolCalls.length ? { tool_calls: result.toolCalls } : {}),
     }
     options.session.messages.push(assistant)
+    if (result.usage?.prompt_tokens || result.usage?.completion_tokens) {
+      options.onEvent({
+        type: "usage",
+        prompt: result.usage.prompt_tokens || 0,
+        completion: result.usage.completion_tokens || 0,
+      })
+    }
 
     if (!result.toolCalls.length) {
       await options.onPersist?.()

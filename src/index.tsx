@@ -61,6 +61,7 @@ const COMMANDS = new Set([
   "plugins",
   "lsp",
   "git",
+  "resume",
   "config",
   "doctor",
   "acp",
@@ -85,6 +86,8 @@ interface Flags {
   format?: string
   port?: number
   host?: string
+  debug: boolean
+  message?: string
   help: boolean
   version: boolean
 }
@@ -97,6 +100,7 @@ function parse(argv: string[]): Flags {
     yolo: false,
     fork: false,
     files: [],
+    debug: false,
     help: false,
     version: false,
   }
@@ -111,6 +115,7 @@ function parse(argv: string[]): Flags {
     else if (arg === "--continue" || arg === "-c") flags.continue = true
     else if (arg === "--json") flags.json = true
     else if (arg === "--yolo" || arg === "--auto") flags.yolo = true
+    else if (arg === "--debug") flags.debug = true
     else if (arg === "--fork") {
       flags.fork = true
       const next = argv[index + 1]
@@ -118,6 +123,7 @@ function parse(argv: string[]): Flags {
     }
     else if ((arg === "--file" || arg === "-f") && argv[index + 1]) flags.files.push(argv[++index])
     else if (arg === "--title" && argv[index + 1]) flags.title = argv[++index]
+    else if ((arg === "--message" || arg === "-m") && argv[index + 1]) flags.message = argv[++index]
     else if ((arg === "--port" || arg === "-p") && argv[index + 1]) flags.port = Number(argv[++index])
     else if (arg === "--host" && argv[index + 1]) flags.host = argv[++index]
     else if (arg === "--format" && argv[index + 1]) {
@@ -155,6 +161,7 @@ Usage:
   zelai session import <file>    import a session json file
   zelai session delete <id>      delete a session
   zelai session fork <id> [t]    fork a session with a new title
+  zelai resume [id]               continue a session (latest when omitted)
   zelai commands                 list custom commands
   zelai mcp                      list configured MCP servers and tools
   zelai mcp add <name> <cmd|url> add an MCP server to config
@@ -184,10 +191,12 @@ Flags:
       --fork [id]       fork a session before continuing
   -f, --file <path>     attach a file to the prompt
       --title <text>    set the session title
+  -m, --message <text> message for --resume or --attach
       --format <fmt>    output format: text or json
   -p, --port <port>    server port (default 4096)
       --host <host>    server host (default 127.0.0.1)
       --json            stream JSON events (run only)
+      --debug           log model requests to stderr
       --yolo            auto-approve write and shell tools
   -h, --help            show this help
   -v, --version         show version
@@ -354,6 +363,7 @@ process.stderr.on("error", (error: any) => {
 
 async function main() {
   const flags = parse(process.argv.slice(2))
+  if (flags.debug) process.env.ZELAI_DEBUG = "1"
   if (flags.version) {
     process.stdout.write(`zelai ${VERSION}\n`)
     return
@@ -435,6 +445,27 @@ async function main() {
   if (command === "sessions") {
     await sessionCommand("list", flags.args)
     return
+  }
+
+  if (command === "resume") {
+    const first = flags.args[0]
+    const looksLikeId = !!first && /^ses_/.test(first)
+    const id = looksLikeId ? first : (await latestSession())?.id
+    if (!id) {
+      process.stderr.write("No sessions yet.\n")
+      process.exit(1)
+    }
+    const loaded = await loadSession(id)
+    if (!loaded) {
+      process.stderr.write(`Session not found: ${id}\n`)
+      process.exit(1)
+    }
+    flags.session = loaded.id
+    flags.continue = false
+    if (looksLikeId) flags.args = flags.args.slice(1)
+    if (!flags.agent) flags.agent = loaded.agent
+    if (!flags.model) flags.model = loaded.model
+    if (flags.message) flags.args = [flags.message, ...flags.args]
   }
 
   if (command === "session") {
@@ -796,7 +827,7 @@ You are the ${name} agent. Be concise and focused.
   if (command === "agent") {
     flags.args.shift()
     message = flags.args.join(" ").trim()
-  } else if (command === "run" || command === "plan" || command === "build" || command === "review") {
+  } else if (command === "run" || command === "plan" || command === "build" || command === "review" || command === "resume") {
     message = flags.args.join(" ").trim()
   } else {
     message = ""
@@ -849,7 +880,7 @@ ${attached}` : attached
   const session = await resolveSession(flags, agent.id, model)
   const tty = process.stdin.isTTY && process.stdout.isTTY
 
-  if (command === "run" || flags.json || !tty) {
+  if (command === "run" || (command === "resume" && message) || flags.json || !tty) {
     if (!message) {
       process.stderr.write("No message. Pass a prompt or pipe stdin.\n")
       process.exit(1)

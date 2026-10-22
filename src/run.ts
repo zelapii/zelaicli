@@ -87,6 +87,9 @@ export async function runOnce(options: RunOptions) {
           if (options.json) process.stdout.write(JSON.stringify(event) + "\n")
           else process.stderr.write(`\n[error] ${event.message}\n`)
         }
+        if (event.type === "usage" && options.json) {
+          process.stdout.write(JSON.stringify(event) + "\n")
+        }
       },
       onPersist: () => saveSession(session),
     })

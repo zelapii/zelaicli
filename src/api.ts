@@ -85,6 +85,14 @@ function parseToolCalls(delta: any, state: Map<number, ToolCall>) {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+export const debugEnabled = () => process.env.ZELAI_DEBUG === "1" || process.env.ZELAI_DEBUG === "true"
+
+function debug(message: string, extra?: unknown) {
+  if (!debugEnabled()) return
+  const detail = extra === undefined ? "" : ` ${typeof extra === "string" ? extra : JSON.stringify(extra)}`
+  process.stderr.write(`[zelai] ${message}${detail}\n`)
+}
+
 async function request(options: ChatOptions, includeTools: boolean) {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -105,6 +113,7 @@ async function request(options: ChatOptions, includeTools: boolean) {
   }
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const started = Date.now()
     try {
       const response = await fetch(endpoint(options.baseUrl), {
         method: "POST",
@@ -112,14 +121,20 @@ async function request(options: ChatOptions, includeTools: boolean) {
         body: JSON.stringify(body),
         signal: options.signal,
       })
-      if (response.ok) return response
+      if (response.ok) {
+        debug(`chat ${options.model} ok in ${Date.now() - started}ms (attempt ${attempt + 1})`)
+        return response
+      }
       const retryable = response.status === 429 || response.status >= 500
       if (retryable && attempt < 2) {
+        debug(`chat ${options.model} http ${response.status}, retrying`)
         await response.body?.cancel()
         await wait(1000 * (attempt + 1))
         continue
       }
-      throw new ApiError(await readError(response), response.status)
+      const message = await readError(response)
+      debug(`chat ${options.model} failed http ${response.status}`, message)
+      throw new ApiError(message, response.status)
     } catch (error) {
       if (error instanceof ApiError) throw error
       if (attempt < 2) {
@@ -191,6 +206,7 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
   buffer += decoder.decode()
   if (buffer) handleLine(buffer)
 
+  debug(`chat ${options.model} done`, usage)
   return {
     content,
     toolCalls: [...toolState.entries()].sort(([a], [b]) => a - b).map(([, call]) => call),
