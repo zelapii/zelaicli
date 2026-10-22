@@ -7,6 +7,7 @@ import { apiKey, loadAccount, loadConfig, maskKey, mergeConfig, type Config } fr
 import { loadCommands } from "./commands"
 import { compactSession } from "./compact"
 import { loadInstructions } from "./instructions"
+import { createMcpManager } from "./mcp"
 import { defaultModel, fetchModels, findModel, models } from "./models"
 import { VERSION } from "./paths"
 import { loadProjectConfig } from "./project"
@@ -38,6 +39,7 @@ const COMMANDS = new Set([
   "sessions",
   "session",
   "commands",
+  "mcp",
   "undo",
   "compact",
   "upgrade",
@@ -106,6 +108,7 @@ Usage:
   zelai session import <file>    import a session json file
   zelai session delete <id>      delete a session
   zelai commands                 list custom commands
+  zelai mcp                      list configured MCP servers and tools
   zelai undo [session]           revert the last file change
   zelai compact [session]        summarize older session context
   zelai upgrade                  upgrade instructions
@@ -365,6 +368,19 @@ async function main() {
     return
   }
 
+  if (command === "mcp") {
+    const mcp = await createMcpManager(config.mcp, cwd)
+    for (const warning of mcp.warnings) process.stderr.write(`[mcp] ${warning}\n`)
+    const summaries = mcp.summaries()
+    if (!summaries.length) process.stdout.write("No MCP servers connected. Add them under mcp in zelai.json.\n")
+    for (const server of summaries) {
+      process.stdout.write(`${server.name}\n`)
+      for (const tool of server.tools) process.stdout.write(`  mcp__${server.name}__${tool}\n`)
+    }
+    await mcp.close()
+    return
+  }
+
   if (command === "upgrade") {
     process.stdout.write("Upgrade with: npm install -g @zelapii/cli\n")
     return
@@ -398,6 +414,9 @@ async function main() {
     process.stdout.write(`Compacted ${session.id}\n`)
     return
   }
+
+  const mcp = await createMcpManager(config.mcp, cwd)
+  for (const warning of mcp.warnings) process.stderr.write(`[mcp] ${warning}\n`)
 
   const agent = agentFor(flags, agents)
   const model = await chooseModel(config, flags, catalog)
@@ -436,7 +455,9 @@ async function main() {
       cwd,
       instructions,
       agents,
+      mcp,
     })
+    await mcp.close()
     process.exit(code)
   }
 
@@ -459,6 +480,7 @@ async function main() {
         agents={agents}
         commands={customCommands}
         instructions={instructions}
+        mcp={mcp}
         prompt={message || undefined}
         cwd={cwd}
       />
@@ -470,6 +492,8 @@ async function main() {
     if (renderer.isDestroyed) resolve()
     renderer.once("destroy", () => resolve())
   })
+
+  await mcp.close()
 }
 
 main().catch((error) => {

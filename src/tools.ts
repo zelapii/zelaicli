@@ -7,7 +7,7 @@ import { recordSnapshot } from "./undo"
 import type { Todo } from "./session"
 
 export interface ApprovalRequest {
-  kind: "write" | "edit" | "bash" | "task"
+  kind: "write" | "edit" | "bash" | "task" | "mcp"
   title: string
   detail: string
 }
@@ -23,6 +23,7 @@ export interface ToolContext {
   signal?: AbortSignal
   autoApprove?: boolean
   runSubagent?: (agent: string, prompt: string) => Promise<string>
+  callMcp?: (name: string, args: unknown) => Promise<{ ok: boolean; output: string }>
   onTodos?: (todos: Todo[]) => void
 }
 
@@ -213,12 +214,13 @@ const taskTool: ToolDefinition = {
 const READONLY_TOOLS = [readTool, globTool, grepTool, listTool]
 const ALL_TOOLS = [readTool, writeTool, editTool, bashTool, globTool, grepTool, listTool]
 
-export function toolDefinitions(agent: Agent): ToolDefinition[] {
+export function toolDefinitions(agent: Agent, mcpTools: ToolDefinition[] = []): ToolDefinition[] {
   let list: ToolDefinition[]
   if (agent.tools === "all") list = [...ALL_TOOLS]
   else if (agent.tools === "readonly") list = [...READONLY_TOOLS]
   else list = ALL_TOOLS.filter((tool) => agent.tools.includes(tool.function.name))
   if (agent.mode === "primary") list.push(taskTool)
+  if (agent.tools !== "readonly") list.push(...mcpTools.filter((tool) => !list.some((entry) => entry.function.name === tool.function.name)))
   if (!list.some((tool) => tool.function.name === "todowrite")) list.push(todoTool)
   return list
 }
@@ -379,6 +381,16 @@ export async function executeTool(name: string, rawArgs: string, context: ToolCo
     return { ok: false, output: `Invalid JSON arguments for ${name}: ${rawArgs.slice(0, 200)}` }
   }
   try {
+    if (name.startsWith("mcp__")) {
+      const ok = await approved(context, {
+        kind: "mcp",
+        title: `MCP tool ${name}`,
+        detail: rawArgs.slice(0, 1200),
+      })
+      if (!ok) return { ok: false, output: "Denied by the user." }
+      if (!context.callMcp) return { ok: false, output: "MCP is not available in this mode." }
+      return await context.callMcp(name, args)
+    }
     switch (name) {
       case "read":
         return await read(context, args)

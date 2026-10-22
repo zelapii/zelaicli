@@ -2,6 +2,7 @@ import { chat, type ChatMessage, type ToolCall } from "./api"
 import { AGENTS, agentContext, findAgent, type Agent } from "./agents"
 import { executeTool, toolDefinitions, type Approve } from "./tools"
 import { createSession, type Session, type Todo } from "./session"
+import type { McpManager } from "./mcp"
 
 export type EngineEvent =
   | { type: "text"; text: string }
@@ -31,6 +32,7 @@ export interface RunTurnOptions {
   agents?: Agent[]
   runSubagent?: (agent: string, prompt: string) => Promise<string>
   subagents?: boolean
+  mcp?: McpManager
 }
 
 function toApiMessages(system: string, messages: ChatMessage[]): ChatMessage[] {
@@ -70,7 +72,7 @@ export async function runTurn(options: RunTurnOptions) {
           })
           return final || "(subagent returned no text)"
         })
-  const tools = toolDefinitions(options.agent)
+  const tools = toolDefinitions(options.agent, options.mcp?.toolDefinitions() || [])
 
   for (let step = 1; step <= maxSteps; step += 1) {
     if (options.signal?.aborted) throw new Error("Cancelled")
@@ -120,6 +122,7 @@ export async function runTurn(options: RunTurnOptions) {
           autoApprove: options.autoApprove,
           signal: options.signal,
           runSubagent,
+          callMcp: options.mcp ? (name, args) => options.mcp!.call(name, args) : undefined,
         })
       }
       const toolMessage: ChatMessage = {

@@ -4,9 +4,10 @@ export interface PermissionConfig {
   edit?: PermissionDecision
   bash?: PermissionDecision | Record<string, PermissionDecision>
   task?: PermissionDecision
+  mcp?: PermissionDecision
 }
 
-export type PermissionKind = "write" | "edit" | "bash" | "task"
+export type PermissionKind = "write" | "edit" | "bash" | "task" | "mcp"
 
 function wildcard(pattern: string, value: string) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
@@ -32,5 +33,6 @@ export function decisionFor(
   if (kind === "bash") return bashDecision(config, detail)
   if (kind === "write" || kind === "edit") return config?.edit ?? "ask"
   if (kind === "task") return config?.task ?? "ask"
+  if (kind === "mcp") return config?.mcp ?? "ask"
   return "allow"
 }

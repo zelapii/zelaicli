@@ -10,6 +10,7 @@ export interface Config {
   agent?: string
   permission?: import("./permissions").PermissionConfig
   instructions?: string[]
+  mcp?: Record<string, import("./mcp").McpServerConfig>
 }
 
 export interface Account {
@@ -96,6 +97,7 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
       ...(project.permission || {}),
     },
     instructions: [...(base.instructions || []), ...(project.instructions || [])],
+    mcp: { ...(base.mcp || {}), ...(project.mcp || {}) },
     apiKey: base.apiKey,
   }
 }

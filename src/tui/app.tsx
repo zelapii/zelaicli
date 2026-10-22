@@ -9,6 +9,7 @@ import { type Agent, findAgent } from "../agents"
 import type { Session, Todo } from "../session"
 import { createSession, listSessions, loadSession, saveSession } from "../session"
 import type { CustomCommand } from "../commands"
+import type { McpManager } from "../mcp"
 import { expandCommand } from "../commands"
 import { compactSession, shouldCompact } from "../compact"
 import { undoLast } from "../undo"
@@ -47,6 +48,7 @@ export interface AppProps {
   agents: Agent[]
   commands: CustomCommand[]
   instructions: string
+  mcp?: McpManager
   prompt?: string
   cwd: string
 }
@@ -218,6 +220,7 @@ export function App(props: AppProps) {
         always,
         agents: props.agents,
         instructions: props.instructions,
+        mcp: props.mcp,
         signal: controller.signal,
         onEvent: event,
         onPersist: persist,
@@ -281,6 +284,7 @@ export function App(props: AppProps) {
             "/undo           revert the last file change",
             "/compact        summarize older context",
             "/commands       list custom commands",
+            "/mcp            list MCP servers and tools",
             "/login          login instructions",
             "/quit           exit",
             ...(props.commands.length ? ["", "Custom commands:", ...props.commands.map((item) => `/${item.name.padEnd(14)} ${item.description}`)] : []),
@@ -361,6 +365,16 @@ export function App(props: AppProps) {
       case "commands":
         add("info", props.commands.length ? props.commands.map((item) => `/${item.name}  ${item.description}`).join("\n") : "No custom commands. Add markdown files under .zelai/commands/.")
         return
+      case "mcp": {
+        const summaries = props.mcp?.summaries() || []
+        add(
+          "info",
+          summaries.length
+            ? summaries.map((server) => `${server.name}: ${server.tools.map((tool) => `mcp__${server.name}__${tool}`).join(", ") || "no tools"}`).join("\n")
+            : "No MCP servers connected.",
+        )
+        return
+      }
       case "login":
         add("info", "Run `zelai auth login` in another terminal, then restart ZelAI.")
         return

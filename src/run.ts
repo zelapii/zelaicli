@@ -4,6 +4,7 @@ import type { Config } from "./config"
 import type { Session } from "./session"
 import { saveSession } from "./session"
 import type { ApprovalRequest } from "./tools"
+import type { McpManager } from "./mcp"
 
 export interface RunOptions {
   config: Config
@@ -16,6 +17,7 @@ export interface RunOptions {
   cwd: string
   instructions?: string
   agents?: Agent[]
+  mcp?: McpManager
 }
 
 export async function runOnce(options: RunOptions) {
@@ -53,6 +55,7 @@ export async function runOnce(options: RunOptions) {
       always: new Set(),
       agents: options.agents,
       instructions: options.instructions,
+      mcp: options.mcp,
       onEvent: (event) => {
         if (event.type === "text") {
           wrote = true

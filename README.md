@@ -47,6 +47,7 @@ zelai session export <id> [f]  # export markdown
 zelai session import <file>    # import session json
 zelai session delete <id>      # delete a session
 zelai commands                 # list custom commands
+zelai mcp                      # list MCP servers and tools
 zelai undo [session]           # revert the last file change
 zelai compact [session]        # summarize older context
 ```
@@ -90,6 +91,29 @@ Writes and shell commands require approval by default. Configure it in `~/.confi
 
 Agents can call `task` to delegate a focused job to a subagent and `todowrite` to maintain the visible todo list. Every write/edit is snapshotted so `/undo` can revert it.
 
+## MCP
+
+Add Model Context Protocol servers under `mcp` in `~/.config/zelai/zelai.json` or `.zelai/zelai.json`:
+
+```json
+{
+  "mcp": {
+    "files": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."],
+      "environment": {}
+    },
+    "docs": {
+      "type": "remote",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ..." }
+    }
+  }
+}
+```
+
+Local servers use stdio; remote servers use Streamable HTTP (JSON or SSE). Tools are exposed as `mcp__<server>__<tool>`. They follow `permission.mcp` (`allow`, `ask`, or `deny`) and default to `ask`. Failed servers are reported at startup and skipped.
+
 ## Layout
 
 ```
@@ -106,6 +130,7 @@ src/
   commands.ts     custom slash commands
   instructions.ts AGENTS.md loader
   compact.ts      context compaction
+  mcp.ts          MCP stdio/HTTP client and tool bridge
   config.ts       config and account state
   auth.ts         device login
 ```
