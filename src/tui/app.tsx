@@ -7,7 +7,7 @@ import type { ModelInfo } from "../models"
 import { findModel } from "../models"
 import { type Agent, findAgent, primaryAgents } from "../agents"
 import type { Session, Todo } from "../session"
-import { createSession, listSessions, loadSession, saveSession } from "../session"
+import { createSession, deleteSession, listSessions, loadSession, saveSession } from "../session"
 import type { CustomCommand } from "../commands"
 import type { McpManager } from "../mcp"
 import { expandCommand } from "../commands"
@@ -22,7 +22,7 @@ import { keybindSummary, matchesAction } from "../keybinds"
 import { resolveTheme, themeName, themeNames, type Palette } from "../theme"
 import type { PluginManager } from "../plugins"
 import type { LspManager } from "../lsp"
-import { gitCommit, gitDiff, gitLog, gitStatus } from "../git"
+import { gitBranch, gitCommit, gitDiff, gitLog, gitStatus } from "../git"
 
 type ItemKind = "user" | "assistant" | "tool" | "info" | "error"
 
@@ -441,7 +441,9 @@ export function App(props: AppProps) {
             "/build          switch to build mode",
             "/review         switch to review mode",
             "/new            start a new session",
-            "/sessions       list recent sessions",
+            "/sessions       pick a recent session",
+            "/rename <title> rename the current session",
+            "/delete         delete the current session",
             "/resume <id>    load a session",
             "/undo           revert the last file change",
             "/redo           redo the last undone change",
@@ -450,7 +452,7 @@ export function App(props: AppProps) {
             "/keybinds       show effective keybinds",
             "/git <action>   status, diff, log, commit",
             "/diff           show unstaged changes",
-            "/status         show git status",
+            "/status         show session and git status",
             "/commit <msg>   commit staged changes",
             "/plugins        list custom tools and hooks",
             "/lsp            list LSP servers",
@@ -604,8 +606,44 @@ export function App(props: AppProps) {
         return
       }
       case "status": {
+        const branch = await gitBranch(props.cwd)
         const result = await gitStatus(props.cwd)
-        add(result.ok ? "tool" : "error", result.output)
+        const changes = result.ok
+          ? result.output.split("\n").filter((line) => line.trim() && !line.startsWith("##")).length
+          : 0
+        add(
+          "info",
+          [
+            `Session  ${activeSession.id}`,
+            `Title    ${activeSession.title}`,
+            `Agent    ${agent().name} (${agent().id})`,
+            `Model    ${currentModel()}`,
+            `Context  ${usage() ? `${formatTokens(usage()!.prompt)} tokens` : "unknown"}`,
+            `Branch   ${branch || "not a git repository"}`,
+            `Changes  ${changes} file${changes === 1 ? "" : "s"}`,
+          ].join("\n"),
+        )
+        return
+      }
+      case "rename": {
+        if (!argument) {
+          add("error", "Usage: /rename <title>")
+          return
+        }
+        activeSession.title = argument
+        await saveSession(activeSession)
+        add("info", `Renamed session to ${argument}`)
+        return
+      }
+      case "delete": {
+        const id = activeSession.id
+        await deleteSession(id)
+        activeSession = createSession(agent().id, model())
+        setItems([])
+        setTodos([])
+        setUsage(undefined)
+        await saveSession(activeSession)
+        add("info", `Deleted ${id}. Started a new session.`)
         return
       }
       case "diff": {

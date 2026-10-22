@@ -49,6 +49,8 @@ zelai session export <id> [f]  # export markdown
 zelai session import <file>    # import session json
 zelai session delete <id>      # delete a session
 zelai session fork <id> "name" # fork a session
+zelai session rename <id> "t" # rename a session
+zelai completion zsh           # print shell completion
 zelai commands                 # list custom commands
 zelai skills                   # list skills
 zelai themes                   # list themes
@@ -81,11 +83,11 @@ zelai run -f src/app.ts "review this file"
 Inside the TUI:
 
 - `/model [id]`, `/agent [name]`, `/plan`, `/build`, `/review`
-- `/new`, `/sessions`, `/resume <id>`, `/fork <id>`
+- `/new`, `/sessions`, `/resume <id>`, `/rename <title>`, `/delete`
 - `/undo`, `/redo`, `/compact`, `/details`, `/init`
 - `/commands`, `/skills`, `/mcp`, `/help`, `/quit`
 - `/theme [name]`, `/keybinds`, `/plugins`, `/lsp`
-- `/git status|diff|log|commit`, `/status`, `/diff`, `/commit <msg>`
+- `/git status|diff|log|commit`, `/status` (session + git), `/diff`, `/commit <msg>`
 - `@path` completes project files; Tab inserts the highlighted file
 - `/` completes slash commands; Tab inserts the highlighted command
 - `/model`, `/agent`, and `/sessions` open a picker (up/down, enter, esc)

@@ -62,6 +62,7 @@ const COMMANDS = new Set([
   "lsp",
   "git",
   "resume",
+  "completion",
   "config",
   "doctor",
   "acp",
@@ -162,6 +163,7 @@ Usage:
   zelai session delete <id>      delete a session
   zelai session fork <id> [t]    fork a session with a new title
   zelai resume [id]               continue a session (latest when omitted)
+  zelai completion bash|zsh|fish  print shell completion
   zelai commands                 list custom commands
   zelai mcp                      list configured MCP servers and tools
   zelai mcp add <name> <cmd|url> add an MCP server to config
@@ -338,6 +340,23 @@ async function sessionCommand(action: string, args: string[]) {
     }
     const forked = await forkSession(session, args.slice(1).join(" ") || undefined)
     process.stdout.write(`Forked ${session.id} to ${forked.id}\n`)
+    return
+  }
+  if (action === "rename") {
+    const id = args[0]
+    const title = args.slice(1).join(" ").trim()
+    if (!id || !title) {
+      process.stderr.write("Usage: zelai session rename <id> <title>\n")
+      process.exit(1)
+    }
+    const session = await loadSession(id)
+    if (!session) {
+      process.stderr.write("Session not found.\n")
+      process.exit(1)
+    }
+    session.title = title
+    await saveSession(session)
+    process.stdout.write(`Renamed ${id} to ${title}\n`)
     return
   }
   if (action === "delete" || action === "rm") {
@@ -520,6 +539,37 @@ async function main() {
     process.stdout.write(result.output + "\n")
     if (!result.ok) process.exit(1)
     return
+  }
+
+  if (command === "completion") {
+    const shell = flags.args[0] || "bash"
+    if (shell === "bash") {
+      process.stdout.write(`_zelai() {
+  local cur="\${COMP_WORDS[COMP_CWORD]}"
+  local cmds="run plan build review agent models auth sessions session commands mcp undo redo compact init stats skills themes plugins lsp git resume config doctor completion acp serve attach upgrade help"
+  COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+}
+complete -F _zelai zelai
+`)
+      return
+    }
+    if (shell === "zsh") {
+      process.stdout.write(`#compdef zelai
+_zelai() {
+  local -a cmds
+  cmds=(run plan build review agent models auth sessions session commands mcp undo redo compact init stats skills themes plugins lsp git resume config doctor completion acp serve attach upgrade help)
+  _describe 'command' cmds
+}
+compdef _zelai zelai
+`)
+      return
+    }
+    if (shell === "fish") {
+      process.stdout.write("complete -c zelai -f -a \"run plan build review agent models auth sessions session commands mcp undo redo compact init stats skills themes plugins lsp git resume config doctor completion acp serve attach upgrade help\"\n")
+      return
+    }
+    process.stderr.write("Usage: zelai completion bash|zsh|fish\n")
+    process.exit(1)
   }
 
   if (command === "config") {
