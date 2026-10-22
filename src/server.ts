@@ -369,6 +369,7 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
 
             const emit = (event: EngineEvent) => {
               if (event.type === "text") write({ type: "text", text: event.text })
+              else if (event.type === "reasoning") write({ type: "reasoning", text: event.text })
               else if (event.type === "tool_start") write({ type: "tool_start", id: event.id, name: event.name, args: event.args })
               else if (event.type === "tool_end") write({ type: "tool_end", id: event.id, name: event.name, ok: event.ok, output: event.output })
               else if (event.type === "todos") write({ type: "todos", todos: event.todos })

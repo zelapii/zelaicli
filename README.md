@@ -90,7 +90,9 @@ Inside the TUI:
 - `/commands`, `/skills`, `/mcp`, `/help`, `/quit`
 - `/theme [name]`, `/keybinds`, `/plugins`, `/lsp`
 - `/git status|diff|log|commit`, `/status` (session + git), `/diff`, `/commit <msg>`
-- `@path` completes project files; Tab inserts the highlighted file
+- `/editor` composes the prompt in `$VISUAL`/`$EDITOR`; `/export` writes the session to `~/.local/share/zelai/exports/`; `/thinking` toggles reasoning blocks
+- `ctrl+p` opens the command palette (slash commands and custom commands)
+- `@path` completes project files; aliases from `references` complete as `@alias/...`; Tab inserts the highlighted file
 - `/` completes slash commands; Tab inserts the highlighted command
 - `/model`, `/agent`, and `/sessions` open a picker (up/down, enter, esc)
 - Up and down arrow walk through prompt history
@@ -125,7 +127,7 @@ Writes and shell commands require approval by default. Configure it in `~/.confi
 }
 ```
 
-Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `git`, `lsp`, `external_directory`, and `question`. `zelai run --yolo` auto-approves tools.
+Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `git`, `lsp`, `external_directory`, and `question`. Values accept `*`/`?` wildcards, tool names (including `mcp__server__tool` and custom tools), and `{ "pattern": "allow" }` maps. `zelai run --yolo` auto-approves tools.
 
 ## Project files
 
@@ -194,12 +196,29 @@ Keybinds can be overridden globally or per project:
     "agent_cycle": ["tab"],
     "agent_cycle_reverse": ["shift+tab"],
     "details_toggle": ["ctrl+o"],
+    "command_palette": ["ctrl+p"],
     "theme_cycle": ["ctrl+t"],
     "help_show": ["f1"],
     "session_new": ["ctrl+n"]
+  },
+  "tui": { "mouse": true }
+}
+```
+
+Set `tui.mouse` to `true` to enable mouse clicks and scrolling in the TUI (off by default).
+
+Named roots make files outside the project addressable from the prompt:
+
+```jsonc
+{
+  "references": {
+    "docs": "~/notes",
+    "api": "/srv/api"
   }
 }
 ```
+
+`@docs/design.md` attaches that file; `@docs` attaches a listing (up to 200 entries) without leaving the project.
 
 Run `/keybinds` or `zelai --help` for the effective bindings.
 
@@ -308,7 +327,8 @@ src/
   instructions.ts AGENTS.md loader
   compact.ts      context compaction
   mcp.ts          MCP stdio/HTTP client and tool bridge
-  files.ts        project file index, @references, attachments
+  files.ts        project file index, @references and aliases, attachments
+  editor.ts       $EDITOR/$VISUAL prompt composition
   ignore.ts       .gitignore/.ignore matcher
   skills.ts       skill discovery
   formatters.ts   post-edit formatter runner

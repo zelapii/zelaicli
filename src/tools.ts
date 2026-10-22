@@ -29,6 +29,7 @@ export interface ApprovalRequest {
     | "external_directory"
     | "lsp"
     | "git"
+    | "custom"
   title: string
   detail: string
 }
@@ -70,9 +71,9 @@ function resolve(context: ToolContext, file: string) {
   return path.isAbsolute(file) ? file : path.resolve(context.cwd, file)
 }
 
-async function approved(context: ToolContext, request: ApprovalRequest) {
+async function approved(context: ToolContext, request: ApprovalRequest, toolName?: string) {
   if (context.autoApprove) return true
-  const decision = decisionFor(context.permission, request.kind, request.detail || request.title)
+  const decision = decisionFor(context.permission, request.kind, request.detail || request.title, toolName)
   if (decision === "allow") return true
   if (decision === "deny") return false
   if (context.always?.has(request.kind)) return true
@@ -740,11 +741,15 @@ async function executeBuiltIn(name: string, rawArgs: string, context: ToolContex
   }
   try {
     if (name.startsWith("mcp__")) {
-      const ok = await approved(context, {
-        kind: "mcp",
-        title: `MCP tool ${name}`,
-        detail: rawArgs.slice(0, 1200),
-      })
+      const ok = await approved(
+        context,
+        {
+          kind: "mcp",
+          title: `MCP tool ${name}`,
+          detail: rawArgs.slice(0, 1200),
+        },
+        name,
+      )
       if (!ok) return { ok: false, output: "Denied by the user." }
       if (!context.callMcp) return { ok: false, output: "MCP is not available in this mode." }
       return await context.callMcp(name, args)
@@ -809,14 +814,21 @@ export async function executeTool(name: string, rawArgs: string, context: ToolCo
     if (context.plugins) args = await context.plugins.before(name, args)
     let outcome: ToolResult
     if (context.plugins?.has(name)) {
-      outcome = await context.plugins.execute(name, args, {
-        cwd: context.cwd,
-        directory: context.cwd,
-        worktree: context.cwd,
-        sessionId: context.sessionId,
-        agent: context.agent || "",
-        signal: context.signal,
-      })
+      const ok = await approved(
+        context,
+        { kind: "custom", title: `Custom tool ${name}`, detail: JSON.stringify(args).slice(0, 1200) },
+        name,
+      )
+      outcome = ok
+        ? await context.plugins.execute(name, args, {
+            cwd: context.cwd,
+            directory: context.cwd,
+            worktree: context.cwd,
+            sessionId: context.sessionId,
+            agent: context.agent || "",
+            signal: context.signal,
+          })
+        : { ok: false, output: "Denied by the user." }
     } else {
       outcome = await executeBuiltIn(name, JSON.stringify(args ?? {}), context)
     }

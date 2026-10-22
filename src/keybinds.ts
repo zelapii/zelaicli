@@ -16,6 +16,7 @@ export const DEFAULT_KEYBINDS: Record<string, string> = {
   agent_cycle: "tab",
   agent_cycle_reverse: "shift+tab",
   details_toggle: "ctrl+d",
+  command_palette: "ctrl+p",
   theme_cycle: "ctrl+t",
   help_show: "f1",
   session_new: "ctrl+n",

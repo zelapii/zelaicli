@@ -1,3 +1,4 @@
+import path from "node:path"
 import { For, Show, createSignal, onMount } from "solid-js"
 import { useKeyboard, useRenderer } from "@opentui/solid"
 import { TextAttributes, type InputRenderable, type ScrollBoxRenderable } from "@opentui/core"
@@ -7,7 +8,7 @@ import type { ModelInfo } from "../models"
 import { findModel } from "../models"
 import { type Agent, findAgent, primaryAgents } from "../agents"
 import type { Session, Todo } from "../session"
-import { createSession, deleteSession, listSessions, loadSession, saveSession } from "../session"
+import { createSession, deleteSession, exportMarkdown, listSessions, loadSession, saveSession } from "../session"
 import type { CustomCommand } from "../commands"
 import type { McpManager } from "../mcp"
 import { expandCommand } from "../commands"
@@ -15,16 +16,17 @@ import { compactSession, shouldCompact } from "../compact"
 import { redoLast, undoLast } from "../undo"
 import { runTurn, type EngineEvent, type QuestionRequest } from "../engine"
 import type { ApprovalRequest } from "../tools"
-import { VERSION } from "../paths"
+import { dataDir, VERSION } from "../paths"
 import type { Skill } from "../skills"
-import { activeReference, expandReferences, listProjectFiles, matchFiles, replaceReference } from "../files"
+import { activeReference, expandReferences, listReferenceFiles, matchFiles, replaceReference } from "../files"
+import { editText, writeAndEdit } from "../editor"
 import { keybindSummary, matchesAction } from "../keybinds"
 import { resolveTheme, themeName, themeNames, type Palette } from "../theme"
 import type { PluginManager } from "../plugins"
 import type { LspManager } from "../lsp"
 import { gitBranch, gitCommit, gitDiff, gitLog, gitStatus } from "../git"
 
-type ItemKind = "user" | "assistant" | "tool" | "info" | "error"
+type ItemKind = "user" | "assistant" | "reasoning" | "tool" | "info" | "error"
 
 interface Item {
   id: string
@@ -84,6 +86,9 @@ const SLASH_COMMANDS = [
   "undo",
   "redo",
   "details",
+  "editor",
+  "export",
+  "thinking",
   "theme",
   "keybinds",
   "git",
@@ -110,6 +115,7 @@ function itemFromMessages(session: Session): Item[] {
       items.push({ id: nextId(), kind: "user", text: message.content })
     }
     if (message.role === "assistant") {
+      if (message.reasoning) items.push({ id: nextId(), kind: "reasoning", text: message.reasoning })
       if (message.content) items.push({ id: nextId(), kind: "assistant", text: message.content })
       for (const call of message.tool_calls || []) {
         items.push({
@@ -145,6 +151,7 @@ export function App(props: AppProps) {
   let scroll: ScrollBoxRenderable | undefined
   let activeSession = props.session
   let currentAssistant: string | undefined
+  let currentReasoning: string | undefined
   let controller: AbortController | undefined
   let hintGuard = false
 
@@ -158,6 +165,7 @@ export function App(props: AppProps) {
   const [agent, setAgent] = createSignal(findAgent(activeSession.agent || props.config.agent || "build", props.agents))
   const [todos, setTodos] = createSignal<Todo[]>(activeSession.todos || [])
   const [details, setDetails] = createSignal(true)
+  const [showThinking, setShowThinking] = createSignal(false)
   const [question, setQuestion] = createSignal<Question | undefined>()
   const [files, setFiles] = createSignal<string[]>([])
   const [hints, setHints] = createSignal<string[]>([])
@@ -253,6 +261,23 @@ export function App(props: AppProps) {
     }, 50)
   }
 
+  const setPrompt = (value: string) => {
+    setDraft(value)
+    if (input) input.value = value
+    updateHints(value)
+    setTimeout(() => input?.focus(), 0)
+  }
+
+  const withEditor = async <T,>(work: () => Promise<T>) => {
+    await renderer.suspend()
+    try {
+      return await work()
+    } finally {
+      await renderer.resume()
+      setTimeout(() => input?.focus(), 0)
+    }
+  }
+
   const persist = async () => {
     activeSession.agent = agent().id
     activeSession.model = model()
@@ -267,6 +292,18 @@ export function App(props: AppProps) {
     }
     if (value.type === "assistant_start") {
       currentAssistant = add("assistant", "")
+      currentReasoning = undefined
+      return
+    }
+    if (value.type === "reasoning") {
+      if (!showThinking()) return
+      if (!currentReasoning) currentReasoning = add("reasoning", "")
+      setItems((current) =>
+        current.map((item) =>
+          item.id === currentReasoning ? { ...item, text: item.text + value.text } : item,
+        ),
+      )
+      scrollDown()
       return
     }
     if (value.type === "text") {
@@ -305,7 +342,7 @@ export function App(props: AppProps) {
       return
     }
     const display = text
-    const prepared = await expandReferences(text, props.cwd, props.agents)
+    const prepared = await expandReferences(text, props.cwd, props.agents, props.config.references)
     if (prepared.agent) setCurrentAgent(prepared.agent)
     text = prepared.text || "Review the attached file."
     const currentAgent = agent()
@@ -448,6 +485,9 @@ export function App(props: AppProps) {
             "/undo           revert the last file change",
             "/redo           redo the last undone change",
             "/details        toggle tool output details",
+            "/editor         compose the prompt in $EDITOR",
+            "/export         open this session in $EDITOR",
+            "/thinking       toggle reasoning blocks",
             "/theme [name]   list or switch theme",
             "/keybinds       show effective keybinds",
             "/git <action>   status, diff, log, commit",
@@ -555,6 +595,34 @@ export function App(props: AppProps) {
       case "details":
         setDetails(!details())
         add("info", `Tool details ${details() ? "on" : "off"}.`)
+        return
+      case "editor": {
+        if (busy()) {
+          add("error", "Wait for the current turn to finish before opening the editor.")
+          return
+        }
+        try {
+          const edited = await withEditor(() => editText(draft()))
+          setPrompt(edited.replace(/\n+$/, ""))
+          add("info", "Prompt updated from $EDITOR.")
+        } catch (error) {
+          add("error", error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
+      case "export": {
+        try {
+          const target = path.join(dataDir(), "exports", `${activeSession.id}.md`)
+          await withEditor(() => writeAndEdit(target, exportMarkdown(activeSession)))
+          add("info", `Exported to ${target}`)
+        } catch (error) {
+          add("error", error instanceof Error ? error.message : String(error))
+        }
+        return
+      }
+      case "thinking":
+        setShowThinking(!showThinking())
+        add("info", `Reasoning blocks ${showThinking() ? "on" : "off"}.`)
         return
       case "theme":
         if (argument) await applyTheme(argument)
@@ -855,6 +923,20 @@ export function App(props: AppProps) {
       add("info", `Tool details ${details() ? "on" : "off"}.`)
       return
     }
+    if (!question() && !busy() && matchesAction(props.config.keybinds, "command_palette", key)) {
+      key.preventDefault?.()
+      const descriptions = new Map(props.commands.map((entry) => [entry.name, entry.description]))
+      openPicker(
+        "Command palette",
+        [...SLASH_COMMANDS, ...descriptions.keys()].sort().map((name) => ({
+          label: `/${name}`,
+          value: name,
+          description: descriptions.get(name),
+        })),
+        (value) => setPrompt(`/${value} `),
+      )
+      return
+    }
     if (!question() && matchesAction(props.config.keybinds, "theme_cycle", key)) {
       key.preventDefault?.()
       const names = themeNames(props.themes)
@@ -903,16 +985,20 @@ export function App(props: AppProps) {
   })
 
   onMount(() => {
-    listProjectFiles(props.cwd).then(setFiles).catch(() => {})
+    listReferenceFiles(props.cwd, props.config.references).then(setFiles).catch(() => {})
     input?.focus()
     if (props.prompt) {
       setTimeout(() => run(props.prompt!), 100)
     }
   })
 
+  const visibleItems = () =>
+    showThinking() ? items() : items().filter((item) => item.kind !== "reasoning")
+
   const colorFor = (item: Item) => {
     if (item.kind === "user") return palette().blue
     if (item.kind === "assistant") return palette().text
+    if (item.kind === "reasoning") return palette().muted
     if (item.kind === "error") return palette().red
     if (item.kind === "tool") return item.text.startsWith("FAILED") ? palette().red : palette().muted
     return palette().muted
@@ -921,6 +1007,7 @@ export function App(props: AppProps) {
   const prefixFor = (item: Item) => {
     if (item.kind === "user") return "> "
     if (item.kind === "assistant") return ""
+    if (item.kind === "reasoning") return "  thinking · "
     if (item.kind === "error") return "! "
     if (item.kind === "tool") return "  "
     return "  "
@@ -957,7 +1044,7 @@ export function App(props: AppProps) {
         scrollY
         scrollX={false}
       >
-        <For each={items()}>
+        <For each={visibleItems()}>
           {(item) => (
             <box flexDirection="column" marginBottom={item.kind === "tool" ? 0 : 1}>
               <text wrapMode="word">

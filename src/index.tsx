@@ -985,7 +985,7 @@ ${attached}` : attached
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     autoFocus: false,
-    useMouse: false,
+    useMouse: config.tui?.mouse ?? false,
     targetFps: 30,
     gatherStats: false,
   } satisfies CliRendererConfig)

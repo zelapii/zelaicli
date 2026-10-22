@@ -16,6 +16,8 @@ export interface PermissionConfig {
   question?: PermissionDecision
   lsp?: PermissionDecision
   git?: PermissionDecision
+  custom?: PermissionDecision
+  [pattern: string]: PermissionDecision | Record<string, PermissionDecision> | undefined
 }
 
 export type PermissionKind =
@@ -35,6 +37,26 @@ export type PermissionKind =
   | "question"
   | "lsp"
   | "git"
+  | "custom"
+
+const BASE_KEYS = new Set([
+  "edit",
+  "bash",
+  "task",
+  "mcp",
+  "read",
+  "glob",
+  "grep",
+  "list",
+  "webfetch",
+  "websearch",
+  "skill",
+  "external_directory",
+  "question",
+  "lsp",
+  "git",
+  "custom",
+])
 
 function wildcard(pattern: string, value: string) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
@@ -56,13 +78,25 @@ export function decisionFor(
   config: PermissionConfig | undefined,
   kind: PermissionKind,
   detail: string,
+  toolName?: string,
 ): PermissionDecision {
-  if (kind === "bash") return bashDecision(config, detail)
-  if (kind === "write" || kind === "edit") return config?.edit ?? "ask"
-  if (kind === "task") return config?.task ?? "ask"
-  if (kind === "mcp") return config?.mcp ?? "ask"
-  if (kind === "external_directory") return config?.external_directory ?? "ask"
-  return (config as any)?.[kind] ?? "allow"
+  let decision: PermissionDecision
+  if (kind === "bash") decision = bashDecision(config, detail)
+  else if (kind === "write" || kind === "edit") decision = config?.edit ?? "ask"
+  else if (kind === "task") decision = config?.task ?? "ask"
+  else if (kind === "mcp") decision = config?.mcp ?? "ask"
+  else if (kind === "external_directory") decision = config?.external_directory ?? "ask"
+  else if (kind === "custom") decision = config?.custom ?? "allow"
+  else decision = (config?.[kind] as PermissionDecision | undefined) ?? "allow"
+
+  const name = toolName || kind
+  const patterns = Object.entries(config || {})
+    .filter((entry): entry is [string, PermissionDecision] => typeof entry[1] === "string" && !BASE_KEYS.has(entry[0]))
+    .sort(([a], [b]) => a.length - b.length)
+  for (const [pattern, value] of patterns) {
+    if (wildcard(pattern, name) || wildcard(pattern, kind)) decision = value
+  }
+  return decision
 }
 
 export function mergePermission(base: PermissionConfig | undefined, override: PermissionConfig | undefined): PermissionConfig {

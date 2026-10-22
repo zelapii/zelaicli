@@ -12,6 +12,15 @@ export interface ServerConfig {
   cors?: boolean | string[]
 }
 
+export interface TuiConfig {
+  mouse?: boolean
+  diffStyle?: "auto" | "stacked"
+  cursor?: {
+    style?: "block" | "line" | "underline" | "default"
+    blinking?: boolean
+  }
+}
+
 export interface Config {
   version: 1
   baseUrl: string
@@ -27,6 +36,8 @@ export interface Config {
   lsp?: LspConfig
   plugins?: string[]
   server?: ServerConfig
+  tui?: TuiConfig
+  references?: Record<string, string>
 }
 
 export interface Account {
@@ -174,6 +185,8 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
     lsp: mergeLsp(base.lsp, project.lsp),
     plugins: [...new Set([...(base.plugins || []), ...(project.plugins || [])])],
     server: { ...(base.server || {}), ...(project.server || {}) },
+    tui: { ...(base.tui || {}), ...(project.tui || {}), cursor: { ...(base.tui?.cursor || {}), ...(project.tui?.cursor || {}) } },
+    references: { ...(base.references || {}), ...(project.references || {}) },
     apiKey: base.apiKey,
   }
 }

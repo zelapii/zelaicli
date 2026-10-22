@@ -13,6 +13,7 @@ export interface ChatMessage {
   name?: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
+  reasoning?: string
 }
 
 export interface ToolDefinition {
@@ -32,12 +33,14 @@ export interface ChatOptions {
   tools?: ToolDefinition[]
   signal?: AbortSignal
   onText?: (delta: string) => void
+  onReasoning?: (delta: string) => void
   temperature?: number
   top_p?: number
 }
 
 export interface ChatResult {
   content: string
+  reasoning: string
   toolCalls: ToolCall[]
   finishReason?: string
   usage?: { prompt_tokens?: number; completion_tokens?: number }
@@ -167,6 +170,7 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
   const toolState = new Map<number, ToolCall>()
   let buffer = ""
   let content = ""
+  let reasoning = ""
   let finishReason: string | undefined
   let usage: ChatResult["usage"]
 
@@ -192,6 +196,16 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
       content += delta.content
       options.onText?.(delta.content)
     }
+    const thinking =
+      typeof delta.reasoning_content === "string"
+        ? delta.reasoning_content
+        : typeof delta.reasoning === "string"
+          ? delta.reasoning
+          : ""
+    if (thinking) {
+      reasoning += thinking
+      options.onReasoning?.(thinking)
+    }
     parseToolCalls(delta, toolState)
   }
 
@@ -209,6 +223,7 @@ export async function chat(options: ChatOptions): Promise<ChatResult> {
   debug(`chat ${options.model} done`, usage)
   return {
     content,
+    reasoning,
     toolCalls: [...toolState.entries()].sort(([a], [b]) => a - b).map(([, call]) => call),
     finishReason,
     usage,

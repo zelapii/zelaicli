@@ -10,6 +10,7 @@ import type { LspManager } from "./lsp"
 
 export type EngineEvent =
   | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
   | { type: "assistant_start" }
   | { type: "tool_start"; id: string; name: string; args: string; description: string }
   | { type: "tool_end"; id: string; name: string; ok: boolean; output: string }
@@ -53,7 +54,10 @@ export interface QuestionRequest {
 }
 
 function toApiMessages(system: string, messages: ChatMessage[]): ChatMessage[] {
-  return [{ role: "system", content: system }, ...messages]
+  return [
+    { role: "system", content: system },
+    ...messages.map(({ reasoning, ...message }) => message),
+  ]
 }
 
 function parseArguments(raw: string) {
@@ -120,11 +124,13 @@ export async function runTurn(options: RunTurnOptions) {
       tools,
       signal: options.signal,
       onText: (text) => options.onEvent({ type: "text", text }),
+      onReasoning: (text) => options.onEvent({ type: "reasoning", text }),
     })
 
     const assistant: ChatMessage = {
       role: "assistant",
       content: result.content || null,
+      ...(result.reasoning ? { reasoning: result.reasoning } : {}),
       ...(result.toolCalls.length ? { tool_calls: result.toolCalls } : {}),
     }
     options.session.messages.push(assistant)

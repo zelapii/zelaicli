@@ -72,6 +72,9 @@ export async function runOnce(options: RunOptions) {
           if (options.json) process.stdout.write(JSON.stringify(event) + "\n")
           else process.stdout.write(event.text)
         }
+        if (event.type === "reasoning" && options.json) {
+          process.stdout.write(JSON.stringify(event) + "\n")
+        }
         if (event.type === "tool_start") {
           if (options.json) process.stdout.write(JSON.stringify(event) + "\n")
           else process.stderr.write(`\n[tool] ${event.name} ${event.args.slice(0, 120)}\n`)
