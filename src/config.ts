@@ -1,6 +1,9 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { accountPath, configPath } from "./paths"
+import type { KeybindConfig } from "./keybinds"
+import type { ThemeConfig } from "./theme"
+import type { LspConfig } from "./lsp"
 
 export interface Config {
   version: 1
@@ -12,6 +15,10 @@ export interface Config {
   instructions?: string[]
   mcp?: Record<string, import("./mcp").McpServerConfig>
   formatter?: Record<string, string>
+  keybinds?: KeybindConfig
+  theme?: string | ThemeConfig
+  lsp?: LspConfig
+  plugins?: string[]
 }
 
 export interface Account {
@@ -133,6 +140,14 @@ export function apiKey(config: Config) {
   return config.apiKey || process.env.ZELAI_API_KEY
 }
 
+function mergeLsp(base: Config["lsp"], project: Config["lsp"]): Config["lsp"] {
+  if (project === undefined) return base
+  if (project === false) return false
+  if (project === true) return true
+  if (base === true || base === undefined || base === false) return project
+  return { ...(base as Record<string, unknown>), ...(project as Record<string, unknown>) } as Config["lsp"]
+}
+
 export function mergeConfig(base: Config, project: Partial<Config>): Config {
   return {
     ...base,
@@ -146,6 +161,10 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
     instructions: [...(base.instructions || []), ...(project.instructions || [])],
     mcp: { ...(base.mcp || {}), ...(project.mcp || {}) },
     formatter: { ...(base.formatter || {}), ...(project.formatter || {}) },
+    keybinds: { ...(base.keybinds || {}), ...(project.keybinds || {}) },
+    theme: project.theme ?? base.theme,
+    lsp: mergeLsp(base.lsp, project.lsp),
+    plugins: [...new Set([...(base.plugins || []), ...(project.plugins || [])])],
     apiKey: base.apiKey,
   }
 }

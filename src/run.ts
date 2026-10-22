@@ -6,6 +6,8 @@ import { saveSession } from "./session"
 import type { ApprovalRequest } from "./tools"
 import type { McpManager } from "./mcp"
 import type { Skill } from "./skills"
+import type { PluginManager } from "./plugins"
+import type { LspManager } from "./lsp"
 
 export interface RunOptions {
   config: Config
@@ -20,6 +22,8 @@ export interface RunOptions {
   agents?: Agent[]
   mcp?: McpManager
   skills?: Skill[]
+  plugins?: PluginManager
+  lsp?: LspManager
 }
 
 export async function runOnce(options: RunOptions) {
@@ -60,6 +64,8 @@ export async function runOnce(options: RunOptions) {
       mcp: options.mcp,
       skills: options.skills,
       formatter: config.formatter,
+      plugins: options.plugins,
+      lsp: options.lsp,
       onEvent: (event) => {
         if (event.type === "text") {
           wrote = true

@@ -18,16 +18,11 @@ import type { ApprovalRequest } from "../tools"
 import { VERSION } from "../paths"
 import type { Skill } from "../skills"
 import { activeReference, expandReferences, listProjectFiles, matchFiles, replaceReference } from "../files"
-
-const BG = "#0b0d10"
-const PANEL = "#15181d"
-const BORDER = "#262b33"
-const TEXT = "#e7e9ee"
-const MUTED = "#8b93a1"
-const ACCENT = "#4ade80"
-const BLUE = "#60a5fa"
-const YELLOW = "#fbbf24"
-const RED = "#f87171"
+import { keybindSummary, matchesAction } from "../keybinds"
+import { resolveTheme, themeName, themeNames, type Palette } from "../theme"
+import type { PluginManager } from "../plugins"
+import type { LspManager } from "../lsp"
+import { gitCommit, gitDiff, gitLog, gitStatus } from "../git"
 
 type ItemKind = "user" | "assistant" | "tool" | "info" | "error"
 
@@ -57,6 +52,9 @@ export interface AppProps {
   instructions: string
   mcp?: McpManager
   skills: Skill[]
+  plugins?: PluginManager
+  lsp?: LspManager
+  themes: Record<string, Palette>
   prompt?: string
   cwd: string
 }
@@ -104,6 +102,8 @@ export function App(props: AppProps) {
   let hintGuard = false
 
   const [items, setItems] = createSignal<Item[]>(itemFromMessages(props.session))
+  const [theme, setTheme] = createSignal(themeName(props.config.theme))
+  const [palette, setPalette] = createSignal(resolveTheme(props.config.theme, props.themes))
   const [draft, setDraft] = createSignal("")
   const [busy, setBusy] = createSignal(false)
   const [step, setStep] = createSignal(0)
@@ -280,6 +280,8 @@ export function App(props: AppProps) {
         skills: props.skills,
         formatter: props.config.formatter,
         askQuestion: requestQuestion,
+        plugins: props.plugins,
+        lsp: props.lsp,
         signal: controller.signal,
         onEvent: event,
         onPersist: persist,
@@ -366,6 +368,14 @@ export function App(props: AppProps) {
             "/undo           revert the last file change",
             "/redo           redo the last undone change",
             "/details        toggle tool output details",
+            "/theme [name]   list or switch theme",
+            "/keybinds       show effective keybinds",
+            "/git <action>   status, diff, log, commit",
+            "/diff           show unstaged changes",
+            "/status         show git status",
+            "/commit <msg>   commit staged changes",
+            "/plugins        list custom tools and hooks",
+            "/lsp            list LSP servers",
             "/skills         list available skills",
             "/init           create or update AGENTS.md",
             "/compact        summarize older context",
@@ -443,6 +453,74 @@ export function App(props: AppProps) {
         setDetails(!details())
         add("info", `Tool details ${details() ? "on" : "off"}.`)
         return
+      case "theme":
+        if (argument) await applyTheme(argument)
+        else add("info", `Themes: ${themeNames(props.themes).map((name) => (name === theme() ? `*${name}` : name)).join(", ")}`)
+        return
+      case "keybinds":
+        add("info", `Keybinds:\n${keybindSummary(props.config.keybinds).join("\n")}`)
+        return
+      case "plugins": {
+        const info = props.plugins?.info || []
+        add(
+          "info",
+          info.length
+            ? info.map((item) => `${item.name}  tools: ${item.tools.join(", ") || "-"}  hooks: ${item.hooks.join(", ") || "-"}`).join("\n")
+            : "No plugins or custom tools loaded.",
+        )
+        return
+      }
+      case "lsp": {
+        const status = props.lsp?.status() || []
+        add(
+          "info",
+          status.length
+            ? status.map((server) => `${server.name} [${server.running ? "running" : "idle"}] ${server.extensions.join(" ")}`).join("\n")
+            : "LSP is disabled. Set lsp to true in zelai.json.",
+        )
+        return
+      }
+      case "git": {
+        const [action = "status", ...rest] = argument.split(/\s+/)
+        if (action === "status") {
+          const result = await gitStatus(props.cwd)
+          add(result.ok ? "tool" : "error", result.output)
+        } else if (action === "diff") {
+          const result = await gitDiff(props.cwd, rest.includes("--staged"))
+          add(result.ok ? "tool" : "error", result.output)
+        } else if (action === "log") {
+          const result = await gitLog(props.cwd, Number(rest[0]) || 10)
+          add(result.ok ? "tool" : "error", result.output)
+        } else if (action === "commit") {
+          const message = rest.join(" ")
+          if (!message) {
+            add("error", "Usage: /git commit <message>")
+            return
+          }
+          const result = await gitCommit(props.cwd, message)
+          add(result.ok ? "tool" : "error", result.output)
+        } else add("error", `Unknown git action: ${action}`)
+        return
+      }
+      case "status": {
+        const result = await gitStatus(props.cwd)
+        add(result.ok ? "tool" : "error", result.output)
+        return
+      }
+      case "diff": {
+        const result = await gitDiff(props.cwd, argument.includes("--staged"))
+        add(result.ok ? "tool" : "error", result.output)
+        return
+      }
+      case "commit": {
+        if (!argument) {
+          add("error", "Usage: /commit <message>")
+          return
+        }
+        const result = await gitCommit(props.cwd, argument)
+        add(result.ok ? "tool" : "error", result.output)
+        return
+      }
       case "skills":
         add(
           "info",
@@ -536,6 +614,18 @@ export function App(props: AppProps) {
     await run(text)
   }
 
+  const applyTheme = async (name: string) => {
+    if (!props.themes[name]) {
+      add("error", `Unknown theme: ${name}. Try: ${themeNames(props.themes).join(", ")}`)
+      return
+    }
+    setTheme(name)
+    setPalette(props.themes[name])
+    props.config.theme = name
+    await saveConfig(props.config).catch(() => {})
+    add("info", `Theme: ${name}`)
+  }
+
   useKeyboard((key) => {
     const pending = approval()
     if (pending) {
@@ -576,20 +666,55 @@ export function App(props: AppProps) {
         return
       }
     }
-    if (key.name === "tab" && !question() && !busy()) {
+    if (!question() && matchesAction(props.config.keybinds, "details_toggle", key)) {
       key.preventDefault?.()
-      const list = primaryAgents(props.agents)
-      const index = list.findIndex((entry) => entry.id === agent().id)
-      const next = list[(index + 1) % list.length]
-      if (next) setCurrentAgent(next.id)
+      setDetails(!details())
+      add("info", `Tool details ${details() ? "on" : "off"}.`)
       return
     }
-    if (key.ctrl && key.name === "c") {
-      if (busy() && controller) {
-        controller.abort()
-        add("info", "Cancelled.")
-      } else {
-        renderer.destroy()
+    if (!question() && matchesAction(props.config.keybinds, "theme_cycle", key)) {
+      key.preventDefault?.()
+      const names = themeNames(props.themes)
+      const next = names[(names.indexOf(theme()) + 1) % names.length]
+      if (next) applyTheme(next)
+      return
+    }
+    if (!question() && matchesAction(props.config.keybinds, "help_show", key)) {
+      key.preventDefault?.()
+      add("info", `Keybinds:\n${keybindSummary(props.config.keybinds).join("\n")}`)
+      return
+    }
+    if (!question() && matchesAction(props.config.keybinds, "session_new", key)) {
+      key.preventDefault?.()
+      command("/new")
+      return
+    }
+    if (matchesAction(props.config.keybinds, "session_interrupt", key) && busy() && controller) {
+      key.preventDefault?.()
+      controller.abort()
+      add("info", "Cancelled.")
+      return
+    }
+    if (!busy() && matchesAction(props.config.keybinds, "app_exit", key)) {
+      key.preventDefault?.()
+      renderer.destroy()
+      return
+    }
+    if (!question() && !busy()) {
+      const list = primaryAgents(props.agents)
+      if (matchesAction(props.config.keybinds, "agent_cycle", key)) {
+        key.preventDefault?.()
+        const index = list.findIndex((entry) => entry.id === agent().id)
+        const next = list[(index + 1) % list.length]
+        if (next) setCurrentAgent(next.id)
+        return
+      }
+      if (matchesAction(props.config.keybinds, "agent_cycle_reverse", key)) {
+        key.preventDefault?.()
+        const index = list.findIndex((entry) => entry.id === agent().id)
+        const next = list[(index + list.length - 1) % list.length]
+        if (next) setCurrentAgent(next.id)
+        return
       }
     }
   })
@@ -603,11 +728,11 @@ export function App(props: AppProps) {
   })
 
   const colorFor = (item: Item) => {
-    if (item.kind === "user") return BLUE
-    if (item.kind === "assistant") return TEXT
-    if (item.kind === "error") return RED
-    if (item.kind === "tool") return item.text.startsWith("FAILED") ? RED : MUTED
-    return MUTED
+    if (item.kind === "user") return palette().blue
+    if (item.kind === "assistant") return palette().text
+    if (item.kind === "error") return palette().red
+    if (item.kind === "tool") return item.text.startsWith("FAILED") ? palette().red : palette().muted
+    return palette().muted
   }
 
   const prefixFor = (item: Item) => {
@@ -619,22 +744,22 @@ export function App(props: AppProps) {
   }
 
   return (
-    <box width="100%" height="100%" backgroundColor={BG} flexDirection="column">
+    <box width="100%" height="100%" backgroundColor={palette().bg} flexDirection="column">
       <box
         height={2}
         flexShrink={0}
         border={["bottom"]}
-        borderColor={BORDER}
+        borderColor={palette().border}
         paddingLeft={1}
         paddingRight={1}
         flexDirection="row"
         justifyContent="space-between"
       >
         <text>
-          <span style={{ fg: ACCENT, attributes: TextAttributes.BOLD }}>ZELAI</span>
-          <span style={{ fg: MUTED }}> {VERSION}</span>
+          <span style={{ fg: palette().accent, attributes: TextAttributes.BOLD }}>ZELAI</span>
+          <span style={{ fg: palette().muted }}> {VERSION}</span>
         </text>
-        <text fg={MUTED}>{props.cwd}</text>
+        <text fg={palette().muted}>{props.cwd}</text>
       </box>
 
       <scrollbox
@@ -654,10 +779,10 @@ export function App(props: AppProps) {
             <box flexDirection="column" marginBottom={item.kind === "tool" ? 0 : 1}>
               <text wrapMode="word">
                 <span style={{ fg: colorFor(item) }}>{prefixFor(item)}</span>
-                <span style={{ fg: item.kind === "user" ? TEXT : colorFor(item) }}>{item.text}</span>
+                <span style={{ fg: item.kind === "user" ? palette().text : colorFor(item) }}>{item.text}</span>
               </text>
               <Show when={item.meta && (details() || item.kind !== "tool")}>
-                <text wrapMode="word" fg={MUTED}>
+                <text wrapMode="word" fg={palette().muted}>
                   {item.kind === "tool" ? `    ${item.meta}` : item.meta}
                 </text>
               </Show>
@@ -670,7 +795,7 @@ export function App(props: AppProps) {
         <box
           flexShrink={0}
           border={["top"]}
-          borderColor={BORDER}
+          borderColor={palette().border}
           paddingLeft={1}
           paddingRight={1}
           flexDirection="column"
@@ -678,10 +803,10 @@ export function App(props: AppProps) {
           <For each={todos().slice(0, 6)}>
             {(todo) => (
               <text wrapMode="word">
-                <span style={{ fg: todo.status === "completed" ? ACCENT : todo.status === "in_progress" ? YELLOW : MUTED }}>
+                <span style={{ fg: todo.status === "completed" ? palette().accent : todo.status === "in_progress" ? palette().yellow : palette().muted }}>
                   {todo.status === "completed" ? "[x] " : todo.status === "in_progress" ? "[~] " : todo.status === "cancelled" ? "[-] " : "[ ] "}
                 </span>
-                <span style={{ fg: todo.status === "completed" ? MUTED : TEXT }}>{todo.content}</span>
+                <span style={{ fg: todo.status === "completed" ? palette().muted : palette().text }}>{todo.content}</span>
               </text>
             )}
           </For>
@@ -690,7 +815,7 @@ export function App(props: AppProps) {
 
       <Show when={busy()}>
         <box height={1} paddingLeft={1} flexShrink={0}>
-          <text fg={YELLOW}>
+          <text fg={palette().yellow}>
             working · step {step()} · {agent().name} · {shortModel(currentModel())}
           </text>
         </box>
@@ -704,26 +829,26 @@ export function App(props: AppProps) {
           right={2}
           zIndex={100}
           border
-          borderColor={YELLOW}
-          backgroundColor={PANEL}
+          borderColor={palette().yellow}
+          backgroundColor={palette().panel}
           flexDirection="column"
           paddingLeft={1}
           paddingRight={1}
           paddingTop={1}
           paddingBottom={1}
         >
-          <text fg={YELLOW} attributes={TextAttributes.BOLD}>
+          <text fg={palette().yellow} attributes={TextAttributes.BOLD}>
             Allow {approval()!.request.kind}?
           </text>
-          <text fg={TEXT} wrapMode="word">
+          <text fg={palette().text} wrapMode="word">
             {approval()!.request.title}
           </text>
-          <text fg={MUTED} wrapMode="word">
+          <text fg={palette().muted} wrapMode="word">
             {approval()!.request.detail.length > 600
               ? `${approval()!.request.detail.slice(0, 600)}...`
               : approval()!.request.detail}
           </text>
-          <text fg={MUTED}>[y] once   [a] always   [n] deny</text>
+          <text fg={palette().muted}>[y] once   [a] always   [n] deny</text>
         </box>
       </Show>
 
@@ -735,29 +860,29 @@ export function App(props: AppProps) {
           right={2}
           zIndex={110}
           border
-          borderColor={BLUE}
-          backgroundColor={PANEL}
+          borderColor={palette().blue}
+          backgroundColor={palette().panel}
           flexDirection="column"
           paddingLeft={1}
           paddingRight={1}
           paddingTop={1}
           paddingBottom={1}
         >
-          <text fg={BLUE} attributes={TextAttributes.BOLD}>
+          <text fg={palette().blue} attributes={TextAttributes.BOLD}>
             {question()!.request.header || "Question"}
           </text>
-          <text fg={TEXT} wrapMode="word">
+          <text fg={palette().text} wrapMode="word">
             {question()!.request.question}
           </text>
           <For each={question()!.request.options || []}>
             {(option, index) => (
-              <text fg={MUTED} wrapMode="word">
+              <text fg={palette().muted} wrapMode="word">
                 {index() + 1}. {option.label}
                 {option.description ? ` - ${option.description}` : ""}
               </text>
             )}
           </For>
-          <text fg={MUTED}>type an answer or a number, then enter</text>
+          <text fg={palette().muted}>type an answer or a number, then enter</text>
         </box>
       </Show>
 
@@ -765,27 +890,27 @@ export function App(props: AppProps) {
         <box
           flexShrink={0}
           border={["top"]}
-          borderColor={BORDER}
+          borderColor={palette().border}
           paddingLeft={1}
           paddingRight={1}
           flexDirection="column"
         >
           <For each={hints().slice(0, 8)}>
             {(file, index) => (
-              <text fg={index() === hintIndex() ? ACCENT : MUTED} wrapMode="none">
+              <text fg={index() === hintIndex() ? palette().accent : palette().muted} wrapMode="none">
                 {index() === hintIndex() ? "> " : "  "}
                 {file}
               </text>
             )}
           </For>
-          <text fg={MUTED}>tab/enter to insert · esc to close</text>
+          <text fg={palette().muted}>tab/enter to insert · esc to close</text>
         </box>
       </Show>
 
       <box
         flexShrink={0}
         border={["top"]}
-        borderColor={BORDER}
+        borderColor={palette().border}
         paddingLeft={1}
         paddingRight={1}
         height={3}
@@ -795,11 +920,11 @@ export function App(props: AppProps) {
           ref={(value: InputRenderable) => (input = value)}
           width="100%"
           placeholder={busy() ? "Waiting for ZelAI..." : "Ask ZelAI, or type /help"}
-          placeholderColor={MUTED}
-          focusedBackgroundColor={BORDER}
-          backgroundColor={PANEL}
-          textColor={TEXT}
-          cursorColor={ACCENT}
+          placeholderColor={palette().muted}
+          focusedBackgroundColor={palette().border}
+          backgroundColor={palette().panel}
+          textColor={palette().text}
+          cursorColor={palette().accent}
           onInput={(value: string) => {
             setDraft(value)
             updateHints(value)
@@ -809,10 +934,10 @@ export function App(props: AppProps) {
       </box>
 
       <box height={1} flexShrink={0} paddingLeft={1} paddingRight={1} justifyContent="space-between" flexDirection="row">
-        <text fg={MUTED}>
+        <text fg={palette().muted}>
           {agent().name} · {shortModel(currentModel())}
         </text>
-        <text fg={MUTED}>{busy() ? "ctrl+c cancel" : `enter · ^C quit · /help${todos().length ? ` · ${todos().filter((todo) => todo.status === "completed").length}/${todos().length}` : ""}`}</text>
+        <text fg={palette().muted}>{busy() ? "ctrl+c cancel" : `enter · ^C quit · /help${todos().length ? ` · ${todos().filter((todo) => todo.status === "completed").length}/${todos().length}` : ""}`}</text>
       </box>
     </box>
   )

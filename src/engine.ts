@@ -5,6 +5,8 @@ import { createSession, type Session, type Todo } from "./session"
 import type { McpManager } from "./mcp"
 import { mergePermission } from "./permissions"
 import { skillSummary, type Skill } from "./skills"
+import type { PluginManager } from "./plugins"
+import type { LspManager } from "./lsp"
 
 export type EngineEvent =
   | { type: "text"; text: string }
@@ -38,6 +40,8 @@ export interface RunTurnOptions {
   skills?: Skill[]
   formatter?: Record<string, string>
   askQuestion?: (request: QuestionRequest) => Promise<string>
+  plugins?: PluginManager
+  lsp?: LspManager
 }
 
 export interface QuestionRequest {
@@ -92,7 +96,13 @@ export async function runTurn(options: RunTurnOptions) {
           })
           return final || "(subagent returned no text)"
         })
-  const tools = toolDefinitions(options.agent, options.mcp?.toolDefinitions() || [])
+  const tools = toolDefinitions(
+    options.agent,
+    options.mcp?.toolDefinitions() || [],
+    options.plugins?.toolDefinitions() || [],
+    { lsp: Boolean(options.lsp) },
+  )
+  await options.plugins?.event("session.start", { sessionId: options.session.id, agent: options.agent.id })
 
   for (let step = 1; step <= maxSteps; step += 1) {
     if (options.signal?.aborted) throw new Error("Cancelled")
@@ -120,6 +130,7 @@ export async function runTurn(options: RunTurnOptions) {
 
     if (!result.toolCalls.length) {
       await options.onPersist?.()
+      await options.plugins?.event("session.idle", { sessionId: options.session.id, agent: options.agent.id })
       return
     }
 
@@ -167,6 +178,9 @@ export async function runTurn(options: RunTurnOptions) {
           callMcp: options.mcp ? (name, args) => options.mcp!.call(name, args) : undefined,
           skills: options.skills,
           formatter: options.formatter,
+          lsp: options.lsp,
+          plugins: options.plugins,
+          agent: options.agent.id,
         })
       }
       const toolMessage: ChatMessage = {

@@ -29,6 +29,10 @@ import {
 } from "./session"
 import { redoLast, undoLast } from "./undo"
 import { loadSkills } from "./skills"
+import { loadThemes } from "./theme"
+import { PluginManager } from "./plugins"
+import { LspManager } from "./lsp"
+import { git, gitCommit, gitDiff, gitLog, gitStatus } from "./git"
 import { collectStats } from "./stats"
 import { App } from "./tui/app"
 
@@ -53,6 +57,13 @@ const COMMANDS = new Set([
   "init",
   "stats",
   "skills",
+  "themes",
+  "plugins",
+  "lsp",
+  "git",
+  "acp",
+  "serve",
+  "attach",
   "upgrade",
   "help",
 ])
@@ -70,6 +81,8 @@ interface Flags {
   files: string[]
   title?: string
   format?: string
+  port?: number
+  host?: string
   help: boolean
   version: boolean
 }
@@ -103,6 +116,8 @@ function parse(argv: string[]): Flags {
     }
     else if ((arg === "--file" || arg === "-f") && argv[index + 1]) flags.files.push(argv[++index])
     else if (arg === "--title" && argv[index + 1]) flags.title = argv[++index]
+    else if ((arg === "--port" || arg === "-p") && argv[index + 1]) flags.port = Number(argv[++index])
+    else if (arg === "--host" && argv[index + 1]) flags.host = argv[++index]
     else if (arg === "--format" && argv[index + 1]) {
       flags.format = argv[++index]
       if (flags.format === "json") flags.json = true
@@ -147,6 +162,13 @@ Usage:
   zelai init                     create or update AGENTS.md
   zelai stats                    show local session statistics
   zelai skills                   list global and project skills
+  zelai themes                   list available themes
+  zelai plugins                  list custom tools and hooks
+  zelai lsp                      list configured LSP servers
+  zelai git <action>             status, diff, log, or commit
+  zelai acp                      run as an ACP agent over stdio
+  zelai serve [--port 4096]      start the local HTTP/SSE server
+  zelai attach <url> <message>   send a prompt to a running server
   zelai compact [session]        summarize older session context
   zelai upgrade                  upgrade instructions
 
@@ -159,6 +181,8 @@ Flags:
   -f, --file <path>     attach a file to the prompt
       --title <text>    set the session title
       --format <fmt>    output format: text or json
+  -p, --port <port>    server port (default 4096)
+      --host <host>    server host (default 127.0.0.1)
       --json            stream JSON events (run only)
       --yolo            auto-approve write and shell tools
   -h, --help            show this help
@@ -325,6 +349,9 @@ async function main() {
   const customCommands = await loadCommands(cwd)
   const instructions = await loadInstructions(cwd, config)
   const skills = await loadSkills(cwd)
+  const themes = await loadThemes(cwd)
+  const plugins = await PluginManager.create(cwd, config)
+  for (const warning of plugins.warnings) process.stderr.write(`[plugin] ${warning}\n`)
   const command = flags.command
 
   if (command === "auth" || command === "login" || command === "logout" || command === "whoami") {
@@ -392,6 +419,54 @@ async function main() {
   if (command === "session") {
     const action = flags.args[0] || "list"
     await sessionCommand(action, flags.args.slice(1))
+    return
+  }
+
+  if (command === "themes") {
+    const active = typeof config.theme === "string" ? config.theme : config.theme?.name || "dark"
+    for (const name of Object.keys(themes).sort()) process.stdout.write(`${name === active ? "*" : " "} ${name}\n`)
+    return
+  }
+
+  if (command === "plugins") {
+    if (!plugins.info.length) {
+      process.stdout.write("No plugins or custom tools. Add .zelai/tools/*.ts or .zelai/plugins/*.ts.\n")
+      return
+    }
+    for (const item of plugins.info) {
+      process.stdout.write(`${item.name}  ${item.file}\n`)
+      if (item.tools.length) process.stdout.write(`  tools: ${item.tools.join(", ")}\n`)
+      if (item.hooks.length) process.stdout.write(`  hooks: ${item.hooks.join(", ")}\n`)
+    }
+    return
+  }
+
+  if (command === "lsp") {
+    const manager = await LspManager.create(config.lsp, cwd)
+    for (const warning of manager?.warnings || []) process.stderr.write(`[lsp] ${warning}\n`)
+    const status = manager?.status() || []
+    if (!status.length) process.stdout.write("LSP is disabled. Set lsp to true or configure servers in zelai.json.\n")
+    for (const server of status) {
+      process.stdout.write(`${server.name}  ${server.extensions.join(" ")}  (${server.command.join(" ")})\n`)
+    }
+    await manager?.close()
+    return
+  }
+
+  if (command === "git") {
+    const [action = "status"] = flags.args
+    let result
+    if (action === "status") result = await gitStatus(cwd)
+    else if (action === "diff") result = await gitDiff(cwd, flags.args.includes("--staged"))
+    else if (action === "log") result = await gitLog(cwd, Number(flags.args[1]) || 10)
+    else if (action === "commit") result = await gitCommit(cwd, flags.args.slice(1).join(" "), flags.args.includes("--all"))
+    else if (action === "show") result = await git(cwd, ["show", "--stat", "--oneline", flags.args[1] || "HEAD"])
+    else {
+      process.stderr.write("Usage: zelai git <status|diff|log|show|commit> [args]\n")
+      process.exit(1)
+    }
+    process.stdout.write(result.output + "\n")
+    if (!result.ok) process.exit(1)
     return
   }
 
@@ -540,6 +615,40 @@ You are the ${name} agent. Be concise and focused.
     return
   }
 
+  if (command === "attach") {
+    const [url, ...rest] = flags.args
+    if (!url) {
+      process.stderr.write("Usage: zelai attach <url> <message> [--session id]\n")
+      process.exit(1)
+    }
+    const { attach } = await import("./server")
+    await attach(url, rest.join(" ").trim(), {
+      session: flags.session,
+      agent: flags.agent,
+      model: flags.model,
+    })
+    return
+  }
+
+  if (command === "acp") {
+    const { runAcp } = await import("./acp")
+    await runAcp(config)
+    return
+  }
+
+  if (command === "serve") {
+    const { startServer } = await import("./server")
+    const instance = await startServer(config, { host: flags.host, port: flags.port, cwd })
+    const stop = async () => {
+      await instance.close()
+      process.exit(0)
+    }
+    process.on("SIGINT", stop)
+    process.on("SIGTERM", stop)
+    await new Promise(() => {})
+    return
+  }
+
   if (!apiKey(config)) {
     process.stderr.write("Not logged in. Run: zelai auth login\n")
     process.exit(1)
@@ -571,6 +680,8 @@ You are the ${name} agent. Be concise and focused.
 
   const mcp = await createMcpManager(config.mcp, cwd)
   for (const warning of mcp.warnings) process.stderr.write(`[mcp] ${warning}\n`)
+  const lsp = await LspManager.create(config.lsp, cwd)
+  for (const warning of lsp?.warnings || []) process.stderr.write(`[lsp] ${warning}\n`)
 
   let agent = agentFor(flags, agents)
   const model = agent.model || (await chooseModel(config, flags, catalog))
@@ -603,8 +714,11 @@ You are the ${name} agent. Be concise and focused.
       agents,
       mcp,
       skills,
+      plugins,
+      lsp,
     })
     await mcp.close()
+    await lsp?.close()
     process.exit(code)
   }
 
@@ -647,8 +761,11 @@ ${attached}` : attached
       agents,
       mcp,
       skills,
+      plugins,
+      lsp,
     })
     await mcp.close()
+    await lsp?.close()
     process.exit(code)
   }
 
@@ -673,6 +790,9 @@ ${attached}` : attached
         instructions={instructions}
         mcp={mcp}
         skills={skills}
+        plugins={plugins}
+        lsp={lsp}
+        themes={themes}
         prompt={message || undefined}
         cwd={cwd}
       />
@@ -686,6 +806,7 @@ ${attached}` : attached
   })
 
   await mcp.close()
+  await lsp?.close()
 }
 
 main().catch((error) => {

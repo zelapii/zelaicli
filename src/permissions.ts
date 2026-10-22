@@ -14,6 +14,8 @@ export interface PermissionConfig {
   skill?: PermissionDecision
   external_directory?: PermissionDecision
   question?: PermissionDecision
+  lsp?: PermissionDecision
+  git?: PermissionDecision
 }
 
 export type PermissionKind =
@@ -31,6 +33,8 @@ export type PermissionKind =
   | "skill"
   | "external_directory"
   | "question"
+  | "lsp"
+  | "git"
 
 function wildcard(pattern: string, value: string) {
   const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")

@@ -51,6 +51,15 @@ zelai session delete <id>      # delete a session
 zelai session fork <id> "name" # fork a session
 zelai commands                 # list custom commands
 zelai skills                   # list skills
+zelai themes                   # list themes
+zelai plugins                  # list custom tools and hooks
+zelai lsp                      # list configured LSP servers
+zelai git status               # git status through the CLI
+zelai git diff --staged        # staged diff
+zelai git commit "message"     # commit staged changes
+zelai acp                      # run as an ACP agent over stdio
+zelai serve --port 4096        # local HTTP/SSE server
+zelai attach http://127.0.0.1:4096 "hello"  # prompt a running server
 zelai mcp                      # list MCP servers and tools
 zelai mcp add docs <cmd|url>   # add an MCP server to config
 zelai undo [session]           # revert the last file change
@@ -68,6 +77,8 @@ Inside the TUI:
 - `/new`, `/sessions`, `/resume <id>`, `/fork <id>`
 - `/undo`, `/redo`, `/compact`, `/details`, `/init`
 - `/commands`, `/skills`, `/mcp`, `/help`, `/quit`
+- `/theme [name]`, `/keybinds`, `/plugins`, `/lsp`
+- `/git status|diff|log|commit`, `/status`, `/diff`, `/commit <msg>`
 - `@path` completes project files; Tab inserts the highlighted file
 - `@agent` switches agent for one prompt
 - `!command` runs a shell command and adds the output to the conversation
@@ -92,12 +103,14 @@ Writes and shell commands require approval by default. Configure it in `~/.confi
     "webfetch": "allow",
     "websearch": "ask",
     "skill": "allow",
+    "git": "ask",
+    "lsp": "allow",
     "external_directory": "ask"
   }
 }
 ```
 
-Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `external_directory`, and `question`. `zelai run --yolo` auto-approves tools.
+Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `git`, `lsp`, `external_directory`, and `question`. `zelai run --yolo` auto-approves tools.
 
 ## Project files
 
@@ -106,6 +119,7 @@ Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `
 - `.zelai/agent/*.md` — custom agents (frontmatter: `description`, `mode`, `tools`, `subagents`, `model`, `temperature`, `top_p`, `steps`, `permission`, `hidden`)
 - `.zelai/command/*.md` — custom slash commands; `$ARGUMENTS` is replaced with the typed text
 - `.zelai/skills/<name>/SKILL.md` — project skills loaded on demand
+- `.zelai/tools/*.ts` or `.zelai/plugins/*.ts` — custom tools and lifecycle hooks
 - Global equivalents live under `~/.config/zelai/`
 
 Both config files accept JSONC (comments and trailing commas). Built-in agents are `build`, `plan`, `review`, plus `explore`, `scout`, and `general` subagents.
@@ -114,7 +128,7 @@ Agents can call `task` to delegate a focused job to a subagent and `todowrite` t
 
 ## Tools
 
-The model can use `read`, `write`, `edit`, `bash`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `apply_patch`, `skill`, `task`, `todowrite`, `question`, and connected MCP tools. File discovery and search honor `.gitignore` and `.ignore`.
+The model can use `read`, `write`, `edit`, `bash`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `apply_patch`, `skill`, `task`, `todowrite`, `question`, `git_status`, `git_diff`, `git_log`, `git_commit`, `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, and connected MCP or custom tools. File discovery and search honor `.gitignore` and `.ignore`.
 
 Optional formatters run after `write`/`edit`:
 
@@ -151,6 +165,90 @@ Add Model Context Protocol servers under `mcp` in `~/.config/zelai/zelai.json` o
 
 Local servers use stdio; remote servers use Streamable HTTP (JSON or SSE). Tools are exposed as `mcp__<server>__<tool>`. They follow `permission.mcp` (`allow`, `ask`, or `deny`) and default to `ask`. Failed servers are reported at startup and skipped.
 
+## Themes and keybinds
+
+Seven themes ship with the CLI: `dark`, `light`, `catppuccin`, `gruvbox`, `matrix`, `nord`, and `tokyonight`. Set `theme` to a name or an object with palette colors, or add JSON files under `~/.config/zelai/themes` and `.zelai/themes`. `/theme` cycles at runtime and saves the choice.
+
+Keybinds can be overridden globally or per project:
+
+```jsonc
+{
+  "keybinds": {
+    "app_exit": ["ctrl+c"],
+    "session_interrupt": ["escape"],
+    "agent_cycle": ["tab"],
+    "agent_cycle_reverse": ["shift+tab"],
+    "details_toggle": ["ctrl+o"],
+    "theme_cycle": ["ctrl+t"],
+    "help_show": ["f1"],
+    "session_new": ["ctrl+n"]
+  }
+}
+```
+
+Run `/keybinds` or `zelai --help` for the effective bindings.
+
+## Git
+
+Repository-aware tools call local `git` without a shell and honor `permission.git`. `git_status` and `git_diff` are read-only; `git_commit` stages nothing unless you pass `--all`. The CLI also exposes `zelai git <status|diff|log|show|commit>`.
+
+## LSP
+
+Set `"lsp": true` to auto-detect installed language servers, or configure them explicitly:
+
+```jsonc
+{
+  "lsp": {
+    "typescript": {
+      "command": ["typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx"]
+    }
+  }
+}
+```
+
+When `typescript` is installed but `typescript-language-server` is not, ZelAI falls back to the bundled `tsserver` protocol. Diagnostics are also requested automatically after file edits.
+
+## Plugins and custom tools
+
+Drop a module in `.zelai/tools` (or list paths in `plugins`):
+
+```ts
+export default {
+  name: "team",
+  tools: {
+    ticket: {
+      description: "Look up a ticket",
+      parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      execute: (args) => `Ticket ${args.id}: example`,
+    },
+  },
+  hooks: {
+    "tool.execute.before": (input, output) => {
+      // mutate output.args before a tool runs
+    },
+  },
+  event: async ({ event, ...payload }) => {
+    // event.type is session.start, session.idle, and so on
+  },
+}
+```
+
+Custom tool names are exposed directly to the model. Tool hooks are `tool.execute.before` and `tool.execute.after`; the `event` export receives lifecycle events such as `session.start` and `session.idle`.
+
+## ACP and local server
+
+`zelai acp` speaks the Agent Client Protocol over stdio using newline-delimited JSON-RPC 2.0. It supports `initialize`, `authenticate`, `session/new`, `session/load`, `session/prompt`, `session/cancel`, permission requests, streaming text, tool calls, and plans. Stdout carries ACP messages only.
+
+`zelai serve` starts a local HTTP/SSE server (default `127.0.0.1:4096`):
+
+- `GET /health`, `GET /models`, `GET /sessions`, `GET /sessions/:id`
+- `POST /sessions` with `{ "agent", "model", "title" }`
+- `POST /sessions/:id/prompt` with SSE events and optional `autoApprove`
+- `POST /sessions/:id/cancel`, `POST /permissions/:id`
+
+`zelai attach <url> <message>` creates a session and streams the reply. Permission prompts are answered on the terminal; non-interactive clients can pass permission decisions through the HTTP API.
+
 ## Layout
 
 ```
@@ -173,6 +271,13 @@ src/
   skills.ts       skill discovery
   formatters.ts   post-edit formatter runner
   stats.ts        local session statistics
+  theme.ts        built-in and custom themes
+  keybinds.ts     default keybinds and matcher
+  git.ts          git status/diff/log/commit tools
+  lsp.ts          LSP and tsserver clients
+  plugins.ts      custom tools and hooks
+  acp.ts          Agent Client Protocol server
+  server.ts       HTTP/SSE server and attach client
   config.ts       config, JSONC parsing, and account state
   auth.ts         device login
 ```

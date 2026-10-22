@@ -8,9 +8,27 @@ import type { Todo } from "./session"
 import type { Skill } from "./skills"
 import { loadIgnore } from "./ignore"
 import { runFormatter } from "./formatters"
+import { GIT_TOOLS, gitCommit, gitDiff, gitLog, gitStatus } from "./git"
+import { LSP_TOOLS, type LspManager } from "./lsp"
+import type { PluginManager } from "./plugins"
 
 export interface ApprovalRequest {
-  kind: "write" | "edit" | "bash" | "task" | "mcp" | "read" | "glob" | "grep" | "list" | "webfetch" | "websearch" | "skill" | "external_directory"
+  kind:
+    | "write"
+    | "edit"
+    | "bash"
+    | "task"
+    | "mcp"
+    | "read"
+    | "glob"
+    | "grep"
+    | "list"
+    | "webfetch"
+    | "websearch"
+    | "skill"
+    | "external_directory"
+    | "lsp"
+    | "git"
   title: string
   detail: string
 }
@@ -29,6 +47,9 @@ export interface ToolContext {
   callMcp?: (name: string, args: unknown) => Promise<{ ok: boolean; output: string }>
   skills?: Skill[]
   formatter?: Record<string, string>
+  lsp?: LspManager
+  plugins?: PluginManager
+  agent?: string
   onTodos?: (todos: Todo[]) => void
 }
 
@@ -306,16 +327,24 @@ const taskTool: ToolDefinition = {
   },
 }
 
-const READONLY_TOOLS = [readTool, globTool, grepTool, listTool, webfetchTool, websearchTool, skillTool]
-const ALL_TOOLS = [readTool, writeTool, editTool, bashTool, globTool, grepTool, listTool, webfetchTool, websearchTool, applyPatchTool, skillTool]
+const GIT_READONLY = GIT_TOOLS.filter((tool) => tool.function.name !== "git_commit")
+const READONLY_TOOLS = [readTool, globTool, grepTool, listTool, webfetchTool, websearchTool, skillTool, ...GIT_READONLY, ...LSP_TOOLS]
+const ALL_TOOLS = [readTool, writeTool, editTool, bashTool, globTool, grepTool, listTool, webfetchTool, websearchTool, applyPatchTool, skillTool, ...GIT_TOOLS, ...LSP_TOOLS]
 
-export function toolDefinitions(agent: Agent, mcpTools: ToolDefinition[] = []): ToolDefinition[] {
+export function toolDefinitions(
+  agent: Agent,
+  mcpTools: ToolDefinition[] = [],
+  pluginTools: ToolDefinition[] = [],
+  options: { lsp?: boolean } = {},
+): ToolDefinition[] {
   let list: ToolDefinition[]
   if (agent.tools === "all") list = [...ALL_TOOLS]
   else if (agent.tools === "readonly") list = [...READONLY_TOOLS]
   else list = ALL_TOOLS.filter((tool) => agent.tools.includes(tool.function.name))
+  if (!options.lsp) list = list.filter((tool) => !tool.function.name.startsWith("lsp_"))
   if (agent.mode !== "subagent") list.push(taskTool)
   if (agent.tools !== "readonly") list.push(...mcpTools.filter((tool) => !list.some((entry) => entry.function.name === tool.function.name)))
+  if (agent.tools !== "readonly") list.push(...pluginTools.filter((tool) => !list.some((entry) => entry.function.name === tool.function.name)))
   if (!list.some((tool) => tool.function.name === "todowrite")) list.push(todoTool)
   if (!list.some((tool) => tool.function.name === "question")) list.push(questionTool)
   return list
@@ -651,7 +680,33 @@ async function skill(context: ToolContext, args: any): Promise<ToolResult> {
   return { ok: true, output: truncate(`# Skill: ${found.name}\n\n${found.content}`) }
 }
 
-export async function executeTool(name: string, rawArgs: string, context: ToolContext): Promise<ToolResult> {
+async function gitTool(context: ToolContext, action: "status" | "diff" | "log" | "commit", args: any): Promise<ToolResult> {
+  const detail =
+    action === "commit"
+      ? `git commit -m ${JSON.stringify(String(args.message || ""))}${args.all ? " (stage all)" : ""}`
+      : `git ${action}`
+  const ok = await approved(context, { kind: "git", title: `Git ${action}`, detail })
+  if (!ok) return { ok: false, output: "Denied by the user." }
+  if (action === "status") return gitStatus(context.cwd)
+  if (action === "diff") return gitDiff(context.cwd, Boolean(args.staged))
+  if (action === "log") return gitLog(context.cwd, Number(args.limit) || 10)
+  return gitCommit(context.cwd, String(args.message || ""), Boolean(args.all))
+}
+
+async function lspTool(context: ToolContext, action: "diagnostics" | "definition" | "references" | "hover", args: any): Promise<ToolResult> {
+  if (!context.lsp) return { ok: false, output: "LSP is not enabled. Set lsp to true or configure servers in zelai.json." }
+  const file = resolve(context, String(args.path || ""))
+  const ok = await approved(context, { kind: "lsp", title: `LSP ${action}`, detail: file })
+  if (!ok) return { ok: false, output: "Denied by the user." }
+  if (action === "diagnostics") return { ok: true, output: await context.lsp.diagnostics(file) }
+  const line = Math.max(1, Number(args.line) || 1)
+  const character = Math.max(1, Number(args.character) || 1)
+  if (action === "definition") return { ok: true, output: await context.lsp.definition(file, line, character) }
+  if (action === "references") return { ok: true, output: await context.lsp.references(file, line, character) }
+  return { ok: true, output: await context.lsp.hover(file, line, character) }
+}
+
+async function executeBuiltIn(name: string, rawArgs: string, context: ToolContext): Promise<ToolResult> {
   let args: any = {}
   try {
     args = rawArgs.trim() ? JSON.parse(rawArgs) : {}
@@ -694,9 +749,54 @@ export async function executeTool(name: string, rawArgs: string, context: ToolCo
         return await skill(context, args)
       case "task":
         return await task(context, args)
+      case "git_status":
+        return await gitTool(context, "status", args)
+      case "git_diff":
+        return await gitTool(context, "diff", args)
+      case "git_log":
+        return await gitTool(context, "log", args)
+      case "git_commit":
+        return await gitTool(context, "commit", args)
+      case "lsp_diagnostics":
+        return await lspTool(context, "diagnostics", args)
+      case "lsp_definition":
+        return await lspTool(context, "definition", args)
+      case "lsp_references":
+        return await lspTool(context, "references", args)
+      case "lsp_hover":
+        return await lspTool(context, "hover", args)
       default:
         return { ok: false, output: `Unknown tool: ${name}` }
     }
+  } catch (error) {
+    return { ok: false, output: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export async function executeTool(name: string, rawArgs: string, context: ToolContext): Promise<ToolResult> {
+  let args: any = {}
+  try {
+    args = rawArgs.trim() ? JSON.parse(rawArgs) : {}
+  } catch {
+    return { ok: false, output: `Invalid JSON arguments for ${name}: ${rawArgs.slice(0, 200)}` }
+  }
+  try {
+    if (context.plugins) args = await context.plugins.before(name, args)
+    let outcome: ToolResult
+    if (context.plugins?.has(name)) {
+      outcome = await context.plugins.execute(name, args, {
+        cwd: context.cwd,
+        directory: context.cwd,
+        worktree: context.cwd,
+        sessionId: context.sessionId,
+        agent: context.agent || "",
+        signal: context.signal,
+      })
+    } else {
+      outcome = await executeBuiltIn(name, JSON.stringify(args ?? {}), context)
+    }
+    if (context.plugins) outcome = await context.plugins.after(name, args, outcome)
+    return outcome
   } catch (error) {
     return { ok: false, output: error instanceof Error ? error.message : String(error) }
   }
