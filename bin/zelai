@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -e
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$dir/zelai-bin" ]; then
+  exec "$dir/zelai-bin" "$@"
+fi
+exec bun "$dir/../src/index.tsx" "$@"

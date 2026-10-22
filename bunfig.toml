@@ -1,0 +1,2 @@
+# OpenTUI Solid is transformed at build time by @opentui/solid/bun-plugin.
+# Use `bun run dev` which preloads the Solid runtime for source execution.
