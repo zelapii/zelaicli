@@ -6,6 +6,9 @@
   "bin": {
     "zelai": "./bin/zelai"
   },
+  "exports": {
+    "./sdk": "./src/sdk.ts"
+  },
   "scripts": {
     "dev": "bun --preload @opentui/solid/preload run src/index.tsx",
     "build": "bun run build.ts",

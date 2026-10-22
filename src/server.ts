@@ -1,4 +1,5 @@
 import path from "node:path"
+import { timingSafeEqual } from "node:crypto"
 import { loadAgents, findAgent } from "./agents"
 import { apiKey, type Config } from "./config"
 import { runTurn, type EngineEvent } from "./engine"
@@ -6,7 +7,7 @@ import { loadInstructions } from "./instructions"
 import { createMcpManager, type McpManager } from "./mcp"
 import { defaultModel, models } from "./models"
 import { VERSION } from "./paths"
-import { createSession, listSessions, loadSession, saveSession, type Session } from "./session"
+import { createSession, deleteSession, listSessions, loadSession, saveSession, type Session } from "./session"
 import { loadSkills, type Skill } from "./skills"
 import { PluginManager } from "./plugins"
 import { LspManager } from "./lsp"
@@ -17,7 +18,9 @@ export interface ServerOptions {
   host?: string
   port?: number
   cwd?: string
-  cors?: boolean
+  cors?: boolean | string[]
+  password?: string
+  insecure?: boolean
 }
 
 interface Running {
@@ -69,8 +72,151 @@ function sse(stream: ReadableStream) {
   })
 }
 
+function isLoopback(host: string) {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]"
+}
+
+function safeEqual(left: string, right: string) {
+  const a = Buffer.from(left)
+  const b = Buffer.from(right)
+  if (a.length !== b.length) {
+    timingSafeEqual(a, a)
+    return false
+  }
+  return timingSafeEqual(a, b)
+}
+
+function credential(request: Request) {
+  const header = request.headers.get("authorization") || ""
+  if (/^bearer\s+/i.test(header)) return header.replace(/^bearer\s+/i, "").trim()
+  if (/^basic\s+/i.test(header)) {
+    try {
+      const decoded = Buffer.from(header.replace(/^basic\s+/i, ""), "base64").toString("utf8")
+      const index = decoded.indexOf(":")
+      return index === -1 ? decoded : decoded.slice(index + 1)
+    } catch {
+      return ""
+    }
+  }
+  return ""
+}
+
+function corsHeaders(request: Request, cors: boolean | string[] | undefined) {
+  const headers: Record<string, string> = {}
+  if (!cors) return headers
+  if (cors === true || cors.includes("*")) {
+    headers["access-control-allow-origin"] = "*"
+    return headers
+  }
+  const origin = request.headers.get("origin")
+  if (origin && cors.includes(origin)) {
+    headers["access-control-allow-origin"] = origin
+    headers.vary = "origin"
+  }
+  return headers
+}
+
+function openApiDoc() {
+  const idParam = { name: "id", in: "path", required: true, schema: { type: "string" } }
+  return {
+    openapi: "3.1.0",
+    info: { title: "ZelAI server", version: VERSION, description: "HTTP/SSE API for the ZelAI coding agent." },
+    servers: [{ url: "/" }],
+    components: {
+      securitySchemes: {
+        basic: { type: "http", scheme: "basic", description: "Any username; the password is server.password." },
+        bearer: { type: "http", scheme: "bearer", description: "server.password as a bearer token." },
+      },
+    },
+    security: [{ basic: [] }, { bearer: [] }],
+    paths: {
+      "/health": { get: { security: [], summary: "Liveness check", responses: { "200": { description: "OK" } } } },
+      "/app": { get: { summary: "Server and project info", responses: { "200": { description: "OK" } } } },
+      "/models": { get: { summary: "Model catalog", responses: { "200": { description: "OK" } } } },
+      "/sessions": {
+        get: { summary: "List sessions", responses: { "200": { description: "OK" } } },
+        post: {
+          summary: "Create a session",
+          requestBody: {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: { agent: { type: "string" }, model: { type: "string" }, title: { type: "string" } },
+                },
+              },
+            },
+          },
+          responses: { "201": { description: "Created" } },
+        },
+      },
+      "/sessions/{id}": {
+        get: { summary: "Get a session", parameters: [idParam], responses: { "200": { description: "OK" }, "404": { description: "Not found" } } },
+        delete: {
+          summary: "Delete a session",
+          parameters: [idParam],
+          responses: { "200": { description: "Deleted" }, "404": { description: "Not found" }, "409": { description: "Session is running" } },
+        },
+      },
+      "/sessions/{id}/messages": {
+        get: { summary: "List session messages", parameters: [idParam], responses: { "200": { description: "OK" } } },
+      },
+      "/sessions/{id}/prompt": {
+        post: {
+          summary: "Run a prompt and stream events",
+          parameters: [idParam],
+          requestBody: {
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["message"],
+                  properties: {
+                    message: { type: "string" },
+                    agent: { type: "string" },
+                    model: { type: "string" },
+                    autoApprove: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Server-sent events. Each event is a JSON object with a type field.",
+              content: { "text/event-stream": { schema: { type: "string" } } },
+            },
+            "404": { description: "Not found" },
+            "409": { description: "Session is busy" },
+          },
+        },
+      },
+      "/sessions/{id}/cancel": {
+        post: { summary: "Cancel a running prompt", parameters: [idParam], responses: { "200": { description: "OK" }, "404": { description: "Not running" } } },
+      },
+      "/permissions/{id}": {
+        post: {
+          summary: "Answer a permission request",
+          parameters: [idParam],
+          requestBody: { content: { "application/json": { schema: { type: "object", properties: { allow: { type: "boolean" } } } } } },
+          responses: { "200": { description: "OK" }, "404": { description: "Not found" } },
+        },
+      },
+      "/doc": { get: { summary: "This document", responses: { "200": { description: "OK" } } } },
+    },
+  }
+}
+
 export async function startServer(config: Config, options: ServerOptions = {}) {
   if (!apiKey(config)) throw new Error("Not logged in. Run: zelai auth login")
+  const host = options.host || config.server?.host || "127.0.0.1"
+  const password = options.password ?? process.env.ZELAI_SERVER_PASSWORD ?? config.server?.password
+  const cors = options.cors ?? config.server?.cors
+  if (!isLoopback(host) && !password && !options.insecure) {
+    throw new Error(
+      `Refusing to listen on ${host} without a password. Set server.password in zelai.json, export ZELAI_SERVER_PASSWORD, or pass --insecure.`,
+    )
+  }
   const cwd = path.resolve(options.cwd || process.cwd())
   const agents = await loadAgents(cwd)
   const skills = await loadSkills(cwd)
@@ -93,12 +239,12 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
   }
 
   const server = Bun.serve({
-    hostname: options.host || "127.0.0.1",
-    port: options.port ?? 4096,
+    hostname: host,
+    port: options.port ?? config.server?.port ?? 4096,
     idleTimeout: 0,
     async fetch(request) {
       const url = new URL(request.url)
-      const headers: Record<string, string> = options.cors === false ? {} : { "access-control-allow-origin": "*" }
+      const headers = corsHeaders(request, cors)
       if (request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
@@ -111,7 +257,38 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
       }
 
       if (url.pathname === "/health") {
-        return json({ ok: true, name: "zelai", version: VERSION }, 200, headers)
+        return json({ ok: true, name: "zelai", version: VERSION, auth: !!password }, 200, headers)
+      }
+
+      if (password && !safeEqual(credential(request), password)) {
+        return json({ error: "Unauthorized" }, 401, { ...headers, "www-authenticate": 'Basic realm="zelai"' })
+      }
+
+      if (url.pathname === "/doc" && request.method === "GET") {
+        return json(openApiDoc(), 200, headers)
+      }
+
+      if (url.pathname === "/app" && request.method === "GET") {
+        return json(
+          {
+            name: "zelai",
+            version: VERSION,
+            cwd,
+            auth: !!password,
+            agents: agents.map((agent) => ({
+              id: agent.id,
+              name: agent.name,
+              description: agent.description,
+              mode: agent.mode,
+              model: agent.model,
+            })),
+            skills: skills.map((skill) => ({ name: skill.name, description: skill.description })),
+            mcp: Object.keys(config.mcp || {}),
+            lsp: lsp?.status().map((entry) => ({ name: entry.name, extensions: entry.extensions })) || [],
+          },
+          200,
+          headers,
+        )
       }
 
       if (url.pathname === "/models" && request.method === "GET") {
@@ -140,6 +317,20 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
         const session = await loadSession(decodeURIComponent(sessionMatch[1]))
         if (!session) return json({ error: "Session not found" }, 404, headers)
         return json({ session }, 200, headers)
+      }
+
+      if (sessionMatch && request.method === "DELETE") {
+        const id = decodeURIComponent(sessionMatch[1])
+        if (state.running.get(id)?.active) return json({ error: "Session is running" }, 409, headers)
+        await deleteSession(id)
+        return json({ ok: true }, 200, headers)
+      }
+
+      const messagesMatch = url.pathname.match(/^\/sessions\/([^/]+)\/messages$/)
+      if (messagesMatch && request.method === "GET") {
+        const session = await loadSession(decodeURIComponent(messagesMatch[1]))
+        if (!session) return json({ error: "Session not found" }, 404, headers)
+        return json({ messages: session.messages }, 200, headers)
       }
 
       const promptMatch = url.pathname.match(/^\/sessions\/([^/]+)\/prompt$/)
@@ -295,7 +486,8 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
     },
   })
 
-  process.stderr.write(`ZelAI server listening on http://${server.hostname}:${server.port}\n`)
+  const authMode = password ? "basic/bearer" : isLoopback(host) ? "disabled, loopback only" : "disabled, insecure"
+  process.stderr.write(`ZelAI server listening on http://${server.hostname}:${server.port} (auth: ${authMode})\n`)
 
   return {
     server,
@@ -312,13 +504,20 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
   }
 }
 
-export async function attach(url: string, message: string, options: { session?: string; agent?: string; model?: string } = {}) {
+export async function attach(
+  url: string,
+  message: string,
+  options: { session?: string; agent?: string; model?: string; password?: string } = {},
+) {
   const base = url.replace(/\/+$/, "")
+  const password = options.password ?? process.env.ZELAI_SERVER_PASSWORD
+  const headers: Record<string, string> = { "content-type": "application/json" }
+  if (password) headers.authorization = `Bearer ${password}`
   let sessionId = options.session
   if (!sessionId) {
     const created = await fetch(`${base}/sessions`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify({ agent: options.agent, model: options.model }),
     })
     if (!created.ok) throw new Error(`Failed to create session: ${created.status} ${await created.text()}`)
@@ -329,7 +528,7 @@ export async function attach(url: string, message: string, options: { session?: 
 
   const response = await fetch(`${base}/sessions/${encodeURIComponent(sessionId)}/prompt`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ message, agent: options.agent, model: options.model }),
   })
   if (!response.ok || !response.body) throw new Error(`Prompt failed: ${response.status} ${await response.text()}`)
@@ -361,7 +560,7 @@ export async function attach(url: string, message: string, options: { session?: 
           const allow = await askPermission(event)
           await fetch(`${base}/permissions/${encodeURIComponent(event.id)}`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers,
             body: JSON.stringify({ allow }),
           })
         } else if (event.type === "done") done = event

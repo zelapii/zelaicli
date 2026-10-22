@@ -5,6 +5,13 @@ import type { KeybindConfig } from "./keybinds"
 import type { ThemeConfig } from "./theme"
 import type { LspConfig } from "./lsp"
 
+export interface ServerConfig {
+  host?: string
+  port?: number
+  password?: string
+  cors?: boolean | string[]
+}
+
 export interface Config {
   version: 1
   baseUrl: string
@@ -19,6 +26,7 @@ export interface Config {
   theme?: string | ThemeConfig
   lsp?: LspConfig
   plugins?: string[]
+  server?: ServerConfig
 }
 
 export interface Account {
@@ -165,6 +173,7 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
     theme: project.theme ?? base.theme,
     lsp: mergeLsp(base.lsp, project.lsp),
     plugins: [...new Set([...(base.plugins || []), ...(project.plugins || [])])],
+    server: { ...(base.server || {}), ...(project.server || {}) },
     apiKey: base.apiKey,
   }
 }

@@ -255,12 +255,39 @@ Custom tool names are exposed directly to the model. Tool hooks are `tool.execut
 
 `zelai serve` starts a local HTTP/SSE server (default `127.0.0.1:4096`):
 
-- `GET /health`, `GET /models`, `GET /sessions`, `GET /sessions/:id`
-- `POST /sessions` with `{ "agent", "model", "title" }`
+- `GET /health` (public), `GET /app`, `GET /doc` (OpenAPI 3.1), `GET /models`
+- `GET /sessions`, `POST /sessions` with `{ "agent", "model", "title" }`
+- `GET /sessions/:id`, `DELETE /sessions/:id`, `GET /sessions/:id/messages`
 - `POST /sessions/:id/prompt` with SSE events and optional `autoApprove`
 - `POST /sessions/:id/cancel`, `POST /permissions/:id`
 
+Set `server.password` in `zelai.json`, pass `--password`, or export `ZELAI_SERVER_PASSWORD` to require Basic or Bearer auth on every route except `/health`. A non-loopback `--host` is refused without a password unless `--insecure` is passed. CORS is disabled by default; enable specific origins with `--cors http://localhost:3000` or allow all with `--cors "*"`.
+
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 4096,
+    "password": "change-me",
+    "cors": ["http://localhost:3000"]
+  }
+}
+```
+
 `zelai attach <url> <message>` creates a session and streams the reply. Permission prompts are answered on the terminal; non-interactive clients can pass permission decisions through the HTTP API.
+
+The SDK is exported from `@zelapii/cli/sdk`:
+
+```ts
+import { createZelaiClient } from "@zelapii/cli/sdk"
+
+const client = createZelaiClient({ baseUrl: "http://127.0.0.1:4096", password: "change-me" })
+const { session } = await client.sessions.create({ agent: "build" })
+for await (const event of client.sessions.prompt(session.id, "summarize this repo")) {
+  if (event.type === "text") process.stdout.write(event.text)
+  if (event.type === "permission") await client.respondPermission(event.id, false)
+}
+```
 
 ## Layout
 
@@ -291,6 +318,7 @@ src/
   plugins.ts      custom tools and hooks
   acp.ts          Agent Client Protocol server
   server.ts       HTTP/SSE server and attach client
+  sdk.ts          typed client for the server API
   config.ts       config, JSONC parsing, and account state
   auth.ts         device login
 ```

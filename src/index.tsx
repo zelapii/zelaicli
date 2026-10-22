@@ -87,6 +87,9 @@ interface Flags {
   format?: string
   port?: number
   host?: string
+  password?: string
+  cors?: string
+  insecure: boolean
   debug: boolean
   message?: string
   help: boolean
@@ -101,6 +104,7 @@ function parse(argv: string[]): Flags {
     yolo: false,
     fork: false,
     files: [],
+    insecure: false,
     debug: false,
     help: false,
     version: false,
@@ -127,6 +131,9 @@ function parse(argv: string[]): Flags {
     else if ((arg === "--message" || arg === "-m") && argv[index + 1]) flags.message = argv[++index]
     else if ((arg === "--port" || arg === "-p") && argv[index + 1]) flags.port = Number(argv[++index])
     else if (arg === "--host" && argv[index + 1]) flags.host = argv[++index]
+    else if (arg === "--password" && argv[index + 1]) flags.password = argv[++index]
+    else if (arg === "--cors" && argv[index + 1]) flags.cors = argv[++index]
+    else if (arg === "--insecure") flags.insecure = true
     else if (arg === "--format" && argv[index + 1]) {
       flags.format = argv[++index]
       if (flags.format === "json") flags.json = true
@@ -197,6 +204,9 @@ Flags:
       --format <fmt>    output format: text or json
   -p, --port <port>    server port (default 4096)
       --host <host>    server host (default 127.0.0.1)
+      --password <pw>  server password (or ZELAI_SERVER_PASSWORD)
+      --cors <list>    allowed CORS origins, comma separated, or *
+      --insecure       allow a non-loopback host without a password
       --json            stream JSON events (run only)
       --debug           log model requests to stderr
       --yolo            auto-approve write and shell tools
@@ -814,6 +824,7 @@ You are the ${name} agent. Be concise and focused.
       session: flags.session,
       agent: flags.agent,
       model: flags.model,
+      password: flags.password ?? config.server?.password,
     })
     return
   }
@@ -826,7 +837,19 @@ You are the ${name} agent. Be concise and focused.
 
   if (command === "serve") {
     const { startServer } = await import("./server")
-    const instance = await startServer(config, { host: flags.host, port: flags.port, cwd })
+    const cors = flags.cors
+      ? flags.cors.trim() === "*"
+        ? true
+        : flags.cors.split(",").map((entry) => entry.trim()).filter(Boolean)
+      : undefined
+    const instance = await startServer(config, {
+      host: flags.host,
+      port: flags.port,
+      cwd,
+      password: flags.password,
+      insecure: flags.insecure,
+      cors,
+    })
     const stop = async () => {
       await instance.close()
       process.exit(0)
