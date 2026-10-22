@@ -663,6 +663,7 @@ compdef _zelai zelai
 Messages:   ${stats.messages} (${stats.user} user, ${stats.assistant} assistant)
 Tool calls: ${stats.toolCalls}
 Characters: ${stats.characters}
+Tokens:     ${stats.tokens.prompt} prompt, ${stats.tokens.completion} completion
 `)
     if (stats.tools.length) process.stdout.write(`\nTools:\n${stats.tools.map((item) => `  ${item.name.padEnd(20)} ${item.count}`).join("\n")}
 `)

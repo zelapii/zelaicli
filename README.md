@@ -70,7 +70,7 @@ zelai mcp add docs <cmd|url>   # add an MCP server to config
 zelai undo [session]           # revert the last file change
 zelai redo [session]           # redo the last undone change
 zelai init                     # create or update AGENTS.md
-zelai stats                    # session and tool statistics
+zelai stats                    # session, tool, and token statistics
 zelai compact [session]        # summarize older context
 zelai resume                   # continue the latest session (TUI)
 zelai resume <id>              # continue a specific session
@@ -97,7 +97,7 @@ Inside the TUI:
 - `!command` runs a shell command and adds the output to the conversation
 - Tab with an empty prompt cycles primary agents
 
-Writes and shell commands can be approved once or always. Todos from the model appear above the prompt, and `question` prompts show an inline choice dialog.
+Writes and shell commands can be approved once or always. Todos from the model appear above the prompt, and `question` prompts show an inline choice dialog. Edit results include a short before/after preview, and LSP diagnostics are appended automatically when a language server is configured.
 
 ## Permissions
 

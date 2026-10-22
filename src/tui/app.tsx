@@ -619,6 +619,7 @@ export function App(props: AppProps) {
             `Agent    ${agent().name} (${agent().id})`,
             `Model    ${currentModel()}`,
             `Context  ${usage() ? `${formatTokens(usage()!.prompt)} tokens` : "unknown"}`,
+            `Total    ${activeSession.tokens ? `${formatTokens(activeSession.tokens.prompt)} prompt / ${formatTokens(activeSession.tokens.completion)} completion` : "no usage yet"}`,
             `Branch   ${branch || "not a git repository"}`,
             `Changes  ${changes} file${changes === 1 ? "" : "s"}`,
           ].join("\n"),

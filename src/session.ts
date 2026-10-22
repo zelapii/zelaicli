@@ -21,6 +21,7 @@ export interface Session {
   messages: ChatMessage[]
   summary?: string
   todos?: Todo[]
+  tokens?: { prompt: number; completion: number }
 }
 
 function fileFor(id: string) {

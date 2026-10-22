@@ -10,6 +10,7 @@ export interface Stats {
   models: { name: string; count: number }[]
   agents: { name: string; count: number }[]
   characters: number
+  tokens: { prompt: number; completion: number }
 }
 
 export async function collectStats(): Promise<Stats> {
@@ -22,6 +23,8 @@ export async function collectStats(): Promise<Stats> {
   let assistant = 0
   let toolCalls = 0
   let characters = 0
+  let promptTokens = 0
+  let completionTokens = 0
 
   for (const session of sessions) {
     models.set(session.model, (models.get(session.model) || 0) + 1)
@@ -38,6 +41,8 @@ export async function collectStats(): Promise<Stats> {
       }
     }
     characters += (session.summary || "").length
+    promptTokens += session.tokens?.prompt || 0
+    completionTokens += session.tokens?.completion || 0
   }
 
   const sorted = (map: Map<string, number>) =>
@@ -53,5 +58,6 @@ export async function collectStats(): Promise<Stats> {
     models: sorted(models),
     agents: sorted(agents),
     characters,
+    tokens: { prompt: promptTokens, completion: completionTokens },
   }
 }

@@ -448,7 +448,11 @@ async function edit(context: ToolContext, args: any): Promise<ToolResult> {
   const formatError = await runFormatter(file, context.formatter, context.cwd)
   await recordSnapshot(context.sessionId, file, content)
   const diagnostics = await lspNote(context, file)
-  return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})${formatError ? `\n${formatError}` : ""}${diagnostics}` }
+  const preview = [
+    ...oldString.split("\n").slice(0, 6).map((line) => `- ${line}`),
+    ...newString.split("\n").slice(0, 6).map((line) => `+ ${line}`),
+  ].join("\n")
+  return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})\n${preview}${formatError ? `\n${formatError}` : ""}${diagnostics}` }
 }
 
 async function bash(context: ToolContext, args: any): Promise<ToolResult> {

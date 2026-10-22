@@ -129,6 +129,12 @@ export async function runTurn(options: RunTurnOptions) {
     }
     options.session.messages.push(assistant)
     if (result.usage?.prompt_tokens || result.usage?.completion_tokens) {
+      const prompt = result.usage.prompt_tokens || 0
+      const completion = result.usage.completion_tokens || 0
+      options.session.tokens = {
+        prompt: (options.session.tokens?.prompt || 0) + prompt,
+        completion: (options.session.tokens?.completion || 0) + completion,
+      }
       options.onEvent({
         type: "usage",
         prompt: result.usage.prompt_tokens || 0,
