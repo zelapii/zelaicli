@@ -675,6 +675,7 @@ export class LspManager {
   readonly warnings: string[] = []
   private servers: ServerEntry[] = []
   private byExtension = new Map<string, ServerEntry>()
+  private cache = new Map<string, { at: number; output: string }>()
   private cwd: string
 
   private constructor(cwd: string) {
@@ -734,9 +735,23 @@ export class LspManager {
     return Boolean(this.serverFor(file))
   }
 
-  async diagnostics(file: string) {
+  async diagnostics(file: string, options: { force?: boolean } = {}) {
+    const cached = this.cache.get(file)
+    if (!options.force && cached && Date.now() - cached.at < 30_000) return cached.output
     const client = await this.clientFor(file)
     const diagnostics = await client.diagnosticsFor(file)
+    const output = this.format(file, diagnostics)
+    this.cache.set(file, { at: Date.now(), output })
+    return output
+  }
+
+  async refresh(file: string) {
+    try {
+      await this.diagnostics(file, { force: true })
+    } catch {}
+  }
+
+  private format(file: string, diagnostics: Diagnostic[]) {
     if (!diagnostics.length) return "No diagnostics."
     const severity = ["error", "warning", "info", "hint"]
     return diagnostics
@@ -773,6 +788,7 @@ export class LspManager {
   }
 
   async close() {
+    this.cache.clear()
     await Promise.all(this.servers.map((server) => server.client?.close()))
     this.servers = []
     this.byExtension.clear()

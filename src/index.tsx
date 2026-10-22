@@ -12,7 +12,7 @@ import { expandReferences, fileAttachments } from "./files"
 import { loadInstructions } from "./instructions"
 import { createMcpManager } from "./mcp"
 import { defaultModel, fetchModels, findModel, models } from "./models"
-import { VERSION } from "./paths"
+import { VERSION, configPath, dataDir } from "./paths"
 import { loadProjectConfig } from "./project"
 import { runOnce } from "./run"
 import {
@@ -61,6 +61,8 @@ const COMMANDS = new Set([
   "plugins",
   "lsp",
   "git",
+  "config",
+  "doctor",
   "acp",
   "serve",
   "attach",
@@ -166,6 +168,8 @@ Usage:
   zelai plugins                  list custom tools and hooks
   zelai lsp                      list configured LSP servers
   zelai git <action>             status, diff, log, or commit
+  zelai config [get|set|unset]   read or change configuration
+  zelai doctor                   check the local setup
   zelai acp                      run as an ACP agent over stdio
   zelai serve [--port 4096]      start the local HTTP/SSE server
   zelai attach <url> <message>   send a prompt to a running server
@@ -194,6 +198,23 @@ Project files:
   .zelai/agent/*.md     custom agents
   .zelai/command/*.md   custom slash commands
 `)
+}
+
+const SECRET_KEYS = new Set(["apikey", "api_key", "token", "secret", "password", "authorization"])
+
+function maskSecrets(value: any, key = ""): any {
+  if (Array.isArray(value)) return value.map((entry) => maskSecrets(entry, key))
+  if (value && typeof value === "object") {
+    const out: Record<string, any> = {}
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      out[entryKey] = SECRET_KEYS.has(entryKey.toLowerCase()) ? maskSecrets(String(entryValue), entryKey) : maskSecrets(entryValue, entryKey)
+    }
+    return out
+  }
+  if (typeof value === "string" && (SECRET_KEYS.has(key.toLowerCase()) || /^zelai_[A-Za-z0-9]/.test(value))) {
+    return maskKey(value)
+  }
+  return value
 }
 
 function agentFor(flags: Flags, agents: Agent[]) {
@@ -467,6 +488,91 @@ async function main() {
     }
     process.stdout.write(result.output + "\n")
     if (!result.ok) process.exit(1)
+    return
+  }
+
+  if (command === "config") {
+    const [action = "list", key, ...rest] = flags.args
+    if (action === "list") {
+      process.stdout.write(JSON.stringify(maskSecrets(config), null, 2) + "\n")
+      return
+    }
+    if (!key) {
+      process.stderr.write("Usage: zelai config get|set|unset <key> [value]\n")
+      process.exit(1)
+    }
+    const pathParts = key.split(".")
+    if (action === "get") {
+      let current: any = config
+      for (const part of pathParts) {
+        if (current === undefined || current === null) break
+        current = current[part]
+      }
+      if (current === undefined) {
+        process.stderr.write(`Not set: ${key}\n`)
+        process.exit(1)
+      }
+      const safe = maskSecrets(current, pathParts[pathParts.length - 1])
+      process.stdout.write(typeof safe === "string" ? safe + "\n" : JSON.stringify(safe, null, 2) + "\n")
+      return
+    }
+    if (action === "set") {
+      const raw = rest.join(" ")
+      let value: any = raw
+      try {
+        value = JSON.parse(raw)
+      } catch {}
+      let target: any = config
+      for (const part of pathParts.slice(0, -1)) {
+        if (typeof target[part] !== "object" || target[part] === null) target[part] = {}
+        target = target[part]
+      }
+      target[pathParts[pathParts.length - 1]] = value
+      await saveConfig(config)
+      process.stdout.write(`${key} = ${typeof value === "string" ? value : JSON.stringify(value)}\n`)
+      return
+    }
+    if (action === "unset") {
+      let target: any = config
+      for (const part of pathParts.slice(0, -1)) {
+        if (typeof target[part] !== "object" || target[part] === null) break
+        target = target[part]
+      }
+      if (typeof target === "object") delete target[pathParts[pathParts.length - 1]]
+      await saveConfig(config)
+      process.stdout.write(`Removed ${key}\n`)
+      return
+    }
+    process.stderr.write("Usage: zelai config get|set|unset <key> [value]\n")
+    process.exit(1)
+  }
+
+  if (command === "doctor") {
+    const lines: string[] = []
+    const file = configPath()
+    lines.push(`config      ${file}`)
+    const stat = await Bun.file(file).stat().catch(() => undefined)
+    lines.push(`            ${stat ? `present (mode ${(stat.mode & 0o777).toString(8)})` : "missing"}`)
+    lines.push(`base url    ${config.baseUrl}`)
+    lines.push(`api key     ${apiKey(config) ? maskKey(apiKey(config)) : "not set (run zelai auth login)"}`)
+    const catalog = await models(config.baseUrl).catch(() => [])
+    lines.push(`models      ${catalog.length ? `${catalog.length} available, default ${defaultModel(catalog) || "none"}` : "unreachable"}`)
+    const gitBin = Bun.which("git")
+    lines.push(`git         ${gitBin ? gitBin : "not installed"}`)
+    const gitRoot = gitBin ? await git(cwd, ["rev-parse", "--show-toplevel"]).catch(() => undefined) : undefined
+    if (gitRoot?.ok) lines.push(`            repo ${gitRoot.output.trim()}`)
+    const lspManager = await LspManager.create(config.lsp, cwd)
+    const servers = lspManager?.status() || []
+    lines.push(`lsp         ${config.lsp ? (servers.length ? servers.map((server) => server.name).join(", ") : "no servers") : "disabled"}`)
+    await lspManager?.close()
+    const mcpManager = await createMcpManager(config.mcp, cwd)
+    const mcpServers = mcpManager.summaries()
+    lines.push(`mcp         ${mcpServers.length ? mcpServers.map((server) => server.name).join(", ") : "none"}`)
+    await mcpManager.close()
+    lines.push(`plugins     ${plugins.info.length ? plugins.info.map((item) => item.name).join(", ") : "none"}`)
+    lines.push(`skills      ${skills.length ? skills.map((entry) => entry.name).join(", ") : "none"}`)
+    lines.push(`data dir    ${dataDir()}`)
+    process.stdout.write(lines.join("\n") + "\n")
     return
   }
 

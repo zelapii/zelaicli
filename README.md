@@ -57,6 +57,9 @@ zelai lsp                      # list configured LSP servers
 zelai git status               # git status through the CLI
 zelai git diff --staged        # staged diff
 zelai git commit "message"     # commit staged changes
+zelai config                    # print the effective config (secrets masked)
+zelai config set theme nord     # change a config value
+zelai doctor                    # check the local setup
 zelai acp                      # run as an ACP agent over stdio
 zelai serve --port 4096        # local HTTP/SSE server
 zelai attach http://127.0.0.1:4096 "hello"  # prompt a running server
@@ -80,6 +83,9 @@ Inside the TUI:
 - `/theme [name]`, `/keybinds`, `/plugins`, `/lsp`
 - `/git status|diff|log|commit`, `/status`, `/diff`, `/commit <msg>`
 - `@path` completes project files; Tab inserts the highlighted file
+- `/` completes slash commands; Tab inserts the highlighted command
+- `/model`, `/agent`, and `/sessions` open a picker (up/down, enter, esc)
+- Up and down arrow walk through prompt history
 - `@agent` switches agent for one prompt
 - `!command` runs a shell command and adds the output to the conversation
 - Tab with an empty prompt cycles primary agents

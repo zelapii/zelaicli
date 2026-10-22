@@ -392,6 +392,20 @@ async function read(context: ToolContext, args: any): Promise<ToolResult> {
   return { ok: true, output: truncate(output) }
 }
 
+async function lspNote(context: ToolContext, file: string) {
+  if (!context.lsp) return ""
+  try {
+    const output = await Promise.race([
+      context.lsp.diagnostics(file),
+      new Promise<string>((resolve) => setTimeout(() => resolve(""), 8000)),
+    ])
+    if (!output || output === "No diagnostics.") return ""
+    return `\n\nDiagnostics:\n${output}`
+  } catch {
+    return ""
+  }
+}
+
 async function write(context: ToolContext, args: any): Promise<ToolResult> {
   const file = resolve(context, String(args.path || ""))
   const content = String(args.content ?? "")
@@ -407,7 +421,8 @@ async function write(context: ToolContext, args: any): Promise<ToolResult> {
   await fs.writeFile(file, content)
   const formatError = await runFormatter(file, context.formatter, context.cwd)
   await recordSnapshot(context.sessionId, file, before)
-  return { ok: true, output: `Wrote ${file} (${content.length} characters)${formatError ? `\n${formatError}` : ""}` }
+  const diagnostics = await lspNote(context, file)
+  return { ok: true, output: `Wrote ${file} (${content.length} characters)${formatError ? `\n${formatError}` : ""}${diagnostics}` }
 }
 
 async function edit(context: ToolContext, args: any): Promise<ToolResult> {
@@ -432,7 +447,8 @@ async function edit(context: ToolContext, args: any): Promise<ToolResult> {
   await fs.writeFile(file, next)
   const formatError = await runFormatter(file, context.formatter, context.cwd)
   await recordSnapshot(context.sessionId, file, content)
-  return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})${formatError ? `\n${formatError}` : ""}` }
+  const diagnostics = await lspNote(context, file)
+  return { ok: true, output: `Edited ${file} (${count} replacement${count === 1 ? "" : "s"})${formatError ? `\n${formatError}` : ""}${diagnostics}` }
 }
 
 async function bash(context: ToolContext, args: any): Promise<ToolResult> {
@@ -664,7 +680,12 @@ async function applyPatch(context: ToolContext, args: any): Promise<ToolResult> 
     return { ok: false, output: truncate(`git apply failed (exit ${code})\n${stderr || stdout}`.trim()) }
   }
   for (const [file, content] of before) await recordSnapshot(context.sessionId, file, content)
-  return { ok: true, output: `Applied patch to ${files.size} file${files.size === 1 ? "" : "s"}` }
+  const notes: string[] = []
+  for (const file of files.keys()) {
+    const note = await lspNote(context, file)
+    if (note) notes.push(`${file}${note}`)
+  }
+  return { ok: true, output: `Applied patch to ${files.size} file${files.size === 1 ? "" : "s"}${notes.length ? `\n\nDiagnostics:${notes.join("\n")}` : ""}` }
 }
 
 async function skill(context: ToolContext, args: any): Promise<ToolResult> {

@@ -43,6 +43,18 @@ interface Question {
   resolve: (value: string) => void
 }
 
+interface PickerItem {
+  label: string
+  value: string
+  description?: string
+}
+
+interface PickerState {
+  title: string
+  items: PickerItem[]
+  onSelect: (value: string) => void
+}
+
 export interface AppProps {
   config: Config
   session: Session
@@ -58,6 +70,35 @@ export interface AppProps {
   prompt?: string
   cwd: string
 }
+
+const SLASH_COMMANDS = [
+  "help",
+  "model",
+  "agent",
+  "plan",
+  "build",
+  "review",
+  "new",
+  "sessions",
+  "resume",
+  "undo",
+  "redo",
+  "details",
+  "theme",
+  "keybinds",
+  "git",
+  "status",
+  "diff",
+  "commit",
+  "plugins",
+  "lsp",
+  "skills",
+  "init",
+  "compact",
+  "commands",
+  "mcp",
+  "quit",
+]
 
 let counter = 0
 const nextId = () => `item-${++counter}`
@@ -115,6 +156,10 @@ export function App(props: AppProps) {
   const [files, setFiles] = createSignal<string[]>([])
   const [hints, setHints] = createSignal<string[]>([])
   const [hintIndex, setHintIndex] = createSignal(0)
+  const [picker, setPicker] = createSignal<PickerState | undefined>()
+  const [pickerIndex, setPickerIndex] = createSignal(0)
+  const history: string[] = []
+  let historyIndex = -1
   const always = new Set<string>()
   const [model, setModel] = createSignal(
     activeSession.model || props.config.model || props.models[0]?.id || "deepseek-chat",
@@ -170,15 +215,28 @@ export function App(props: AppProps) {
 
   const updateHints = (value: string) => {
     const ref = activeReference(value)
-    setHints(ref ? matchFiles(files(), ref.query) : [])
+    if (ref) {
+      setHints(matchFiles(files(), ref.query))
+      setHintIndex(0)
+      return
+    }
+    if (value.startsWith("/") && !value.includes(" ")) {
+      const query = value.slice(1).toLowerCase()
+      const names = [...SLASH_COMMANDS, ...props.commands.map((item) => item.name)]
+      setHints(names.filter((name) => name.startsWith(query)).sort())
+      setHintIndex(0)
+      return
+    }
+    setHints([])
     setHintIndex(0)
   }
 
   const applyHint = () => {
-    const ref = activeReference(draft())
+    const current = draft()
     const file = hints()[hintIndex()]
-    if (!ref || !file) return
-    const value = replaceReference(draft(), ref.start, file)
+    if (!file) return
+    const ref = activeReference(current)
+    const value = ref ? replaceReference(current, ref.start, file) : `/${file} `
     setDraft(value)
     if (input) input.value = value
     setHints([])
@@ -344,6 +402,15 @@ export function App(props: AppProps) {
     add("info", `Model: ${found.name} (${found.id})`)
   }
 
+  const openPicker = (title: string, items: PickerItem[], onSelect: (value: string) => void) => {
+    if (!items.length) {
+      add("info", `${title}: nothing to choose.`)
+      return
+    }
+    setPickerIndex(0)
+    setPicker({ title, items, onSelect })
+  }
+
   const command = async (text: string) => {
     const [name, ...rest] = text.slice(1).split(/\s+/)
     const argument = rest.join(" ").trim()
@@ -389,16 +456,32 @@ export function App(props: AppProps) {
         return
       case "model":
         if (argument) setCurrentModel(argument)
-        else {
-          const list = props.models
-            .map((entry) => `${entry.id === model() ? "*" : " "} ${entry.id}${entry.tools ? "" : " (no tools)"}`)
-            .join("\n")
-          add("info", `Models:\n${list || "No models cached. Run zelai models."}`)
-        }
+        else if (props.models.length) {
+          openPicker(
+            "Select model",
+            props.models.map((entry) => ({
+              label: `${entry.id === model() ? "*" : " "} ${entry.id}`,
+              value: entry.id,
+              description: entry.tools ? "" : "no tools",
+            })),
+            setCurrentModel,
+          )
+        } else add("info", "No models cached. Run zelai models.")
         return
       case "agent":
         if (argument) setCurrentAgent(argument)
-        else add("info", `Agents:\n${primaryAgents(props.agents).map((entry) => `${entry.id === agent().id ? "*" : " "} ${entry.id} - ${entry.description}${entry.model ? ` [${entry.model}]` : ""}`).join("\n")}`)
+        else {
+          const list = primaryAgents(props.agents)
+          openPicker(
+            "Select agent",
+            list.map((entry) => ({
+              label: `${entry.id === agent().id ? "*" : " "} ${entry.id}`,
+              value: entry.id,
+              description: entry.description,
+            })),
+            setCurrentAgent,
+          )
+        }
         return
       case "plan":
       case "build":
@@ -414,17 +497,24 @@ export function App(props: AppProps) {
         return
       case "sessions": {
         const sessions = await listSessions()
-        add(
-          "info",
-          sessions.length
-            ? sessions.slice(0, 12).map((session) => `${session.id}  ${session.title}`).join("\n")
-            : "No sessions yet.",
+        if (!sessions.length) {
+          add("info", "No sessions yet.")
+          return
+        }
+        openPicker(
+          "Resume session",
+          sessions.slice(0, 20).map((session) => ({
+            label: `${session.id}  ${session.title}`,
+            value: session.id,
+            description: new Date(session.updatedAt).toLocaleString(),
+          })),
+          (id) => command(`/resume ${id}`),
         )
         return
       }
       case "resume": {
         if (!argument) {
-          add("error", "Usage: /resume <session-id>")
+          await command("/sessions")
           return
         }
         const loaded = await loadSession(argument)
@@ -602,6 +692,10 @@ export function App(props: AppProps) {
     if (busy()) return
     setDraft("")
     if (input) input.value = ""
+    if (text.trim()) {
+      history.push(text)
+      historyIndex = -1
+    }
     setHints([])
     if (text.startsWith("!")) {
       await runShell(text.slice(1).trim())
@@ -644,8 +738,34 @@ export function App(props: AppProps) {
       }
       return
     }
+    const active = picker()
+    if (active) {
+      if (key.name === "up") {
+        key.preventDefault?.()
+        setPickerIndex((index) => (index - 1 + active.items.length) % active.items.length)
+        return
+      }
+      if (key.name === "down") {
+        key.preventDefault?.()
+        setPickerIndex((index) => (index + 1) % active.items.length)
+        return
+      }
+      if (key.name === "return") {
+        key.preventDefault?.()
+        const item = active.items[pickerIndex()]
+        setPicker(undefined)
+        if (item) active.onSelect(item.value)
+        return
+      }
+      if (key.name === "escape") {
+        key.preventDefault?.()
+        setPicker(undefined)
+        return
+      }
+      return
+    }
     if (!question() && hints().length) {
-      if (key.name === "tab" || key.name === "return") {
+      if (key.name === "tab" || (key.name === "return" && !!activeReference(draft()))) {
         key.preventDefault?.()
         applyHint()
         return
@@ -665,6 +785,19 @@ export function App(props: AppProps) {
         setHintIndex((hintIndex() + hints().length - 1) % hints().length)
         return
       }
+    }
+    if (!question() && !hints().length && !draft() && (key.name === "up" || key.name === "down")) {
+      if (!history.length) return
+      key.preventDefault?.()
+      if (key.name === "up") {
+        historyIndex = historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1)
+      } else {
+        historyIndex = historyIndex < 0 ? -1 : Math.min(history.length - 1, historyIndex + 1)
+      }
+      const value = historyIndex < 0 ? "" : history[historyIndex]
+      setDraft(value)
+      if (input) input.value = value
+      return
     }
     if (!question() && matchesAction(props.config.keybinds, "details_toggle", key)) {
       key.preventDefault?.()
@@ -883,6 +1016,38 @@ export function App(props: AppProps) {
             )}
           </For>
           <text fg={palette().muted}>type an answer or a number, then enter</text>
+        </box>
+      </Show>
+
+      <Show when={picker()}>
+        <box
+          position="absolute"
+          top={4}
+          left={2}
+          right={2}
+          zIndex={120}
+          border
+          borderColor={palette().accent}
+          backgroundColor={palette().panel}
+          flexDirection="column"
+          paddingLeft={1}
+          paddingRight={1}
+          paddingTop={1}
+          paddingBottom={1}
+        >
+          <text fg={palette().accent} attributes={TextAttributes.BOLD}>
+            {picker()!.title}
+          </text>
+          <For each={picker()!.items.slice(0, 12)}>
+            {(item, index) => (
+              <text fg={index() === pickerIndex() ? palette().text : palette().muted} wrapMode="none">
+                {index() === pickerIndex() ? "> " : "  "}
+                {item.label}
+                {item.description ? ` - ${item.description}` : ""}
+              </text>
+            )}
+          </For>
+          <text fg={palette().muted}>up/down to move · enter to select · esc to cancel</text>
         </box>
       </Show>
 
