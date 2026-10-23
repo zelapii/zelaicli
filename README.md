@@ -2,7 +2,7 @@
 
 Terminal coding agent for [ZelAI](https://ai.zelai.qzz.io), built with Bun, TypeScript, and OpenTUI.
 
-ZelAI keeps the workflow people expect from a modern coding agent — an interactive TUI, plan/build/review agents, subagents, todos, permissions, undo, custom commands, sessions, and a single model gateway — while the implementation here is its own codebase.
+ZelAI keeps the workflow people expect from a modern coding agent — an interactive TUI, plan/build/review agents, subagents, todos, permissions, policies, undo, custom commands, sessions, multi-provider routing, cost estimates, and a single model gateway — while the implementation here is its own codebase.
 
 The opencode parity roadmap and upcoming features are tracked in [FITUR.md](FITUR.md).
 
@@ -33,6 +33,43 @@ Environment overrides:
 - `ZELAI_BASE_URL` — gateway base URL, default `https://ai.zelai.qzz.io`
 - `ZELAI_API_KEY` — use a key without writing config
 - `ZELAI_CONFIG_DIR`, `ZELAI_DATA_DIR` — override storage locations
+- `ZELAI_CLI_CONFIG`, `ZELAI_CLI_CONFIG_CONTENT` — override or inline `cli.json`
+
+## Providers and models
+
+ZelAI keeps the gateway as the default, but models can come from any OpenAI-compatible provider. Add providers under `providers` in `zelai.json`:
+
+```jsonc
+{
+  "providers": {
+    "openrouter": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "env": ["OPENROUTER_API_KEY"],
+      "headers": { "HTTP-Referer": "https://example.com" },
+      "models": {
+        "anthropic/claude-sonnet-4": {
+          "id": "anthropic/claude-sonnet-4",
+          "context": 200000,
+          "pricing": { "input": 3, "output": 15 }
+        }
+      }
+    },
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "models": { "qwen3:8b": { "id": "qwen3:8b", "context": 32768 } }
+    }
+  }
+}
+```
+
+Pick a model with `provider/model`, and append a reasoning variant:
+
+```sh
+zelai run -m openrouter/anthropic/claude-sonnet-4#high "review this diff"
+```
+
+`#high`, `#medium`, `#low`, and `#minimal` map to `reasoning_effort`. Provider `options` are forwarded as extra request fields. `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `ANTHROPIC_API_KEY` are detected automatically when no provider config is present. Pricing metadata feeds the per-session cost estimate.
 
 ## Usage
 
@@ -133,6 +170,33 @@ Writes and shell commands require approval by default. Configure it in `~/.confi
 
 Supported keys: `edit`, `bash`, `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `git`, `lsp`, `external_directory`, and `question`. Values accept `*`/`?` wildcards, tool names (including `mcp__server__tool` and custom tools), and `{ "pattern": "allow" }` maps. `zelai run --yolo` auto-approves tools.
 
+The v2 list form is also accepted. Rules are applied in order, so the last matching rule wins:
+
+```jsonc
+{
+  "permissions": [
+    { "action": "shell", "resource": "git *", "effect": "allow" },
+    { "action": "shell", "resource": "rm *", "effect": "deny" },
+    { "action": "edit", "resource": "*", "effect": "ask" },
+    { "action": "subagent", "resource": "explore", "effect": "allow" }
+  ]
+}
+```
+
+`action` also accepts `write`, `read`, `glob`, `grep`, `websearch`, and raw tool names. Local policies can hard-deny providers, tools, and MCP integrations without prompting:
+
+```jsonc
+{
+  "policies": [
+    { "action": "provider.use", "resource": "openrouter/*", "effect": "deny" },
+    { "action": "tool.use", "resource": "bash", "effect": "allow" },
+    { "action": "integration.use", "resource": "docs", "effect": "deny" }
+  ]
+}
+```
+
+Policies are merged from config, `~/.local/share/zelai/policies.json`, `ZELAI_POLICIES`, and `OPENCODE_POLICIES`. A `deny` policy is enforced before the permission prompt.
+
 ## Project files
 
 - `AGENTS.md`, `.zelai/AGENTS.md` — project instructions
@@ -150,6 +214,19 @@ Agents can call `task` to delegate a focused job to a subagent and `todowrite` t
 ## Tools
 
 The model can use `read`, `write`, `edit`, `bash`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `apply_patch`, `skill`, `task`, `todowrite`, `question`, `git_status`, `git_diff`, `git_log`, `git_commit`, `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_hover`, and connected MCP or custom tools. File discovery and search honor `.gitignore` and `.ignore`.
+
+`websearch` supports `exa`, `firecrawl`, `parallel`, `tavily`, and `tinyfish`. Configure the preferred provider and keys under `websearch`; keys are also read from `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `PARALLEL_API_KEY`, `TAVILY_API_KEY`, and `TINYFISH_API_KEY`:
+
+```jsonc
+{
+  "websearch": {
+    "provider": "tavily",
+    "apiKeys": { "tavily": "tvly-..." }
+  }
+}
+```
+
+When the preferred provider fails with `429`, ZelAI fails over to the next configured provider and finally DuckDuckGo.
 
 Optional formatters run after `write`/`edit`:
 
@@ -329,9 +406,20 @@ src/
   api.ts          OpenAI-compatible client with retries
   tools.ts        read/write/edit/bash/glob/grep/list/web/apply_patch/skill/task/todowrite
   agents.ts       agent prompts, custom agents, subagents
-  session.ts      local session store, export/import
-  permissions.ts  allow/ask/deny rules with bash patterns
+  session.ts      local session store, export/import, child sessions, cost
+  permissions.ts  allow/ask/deny rules with bash patterns and v2 rule lists
+  policy.ts       provider/tool/integration policy engine
+  modelroute.ts   provider/model routing, variants, and request options
+  providers.ts    provider config, env discovery, local provider probing
+  pricing.ts      model pricing and cost estimates
+  websearch.ts    exa/firecrawl/parallel/tavily/tinyfish search with failover
+  snapshot.ts     git worktree capture and restore
+  diff.ts         unified diff and diff stats
   undo.ts         file snapshots per session
+  service.ts      background server service state
+  pair.ts         loopback pairing web UI
+  warming.ts      provider keep-alive requests
+  mcp-oauth.ts    MCP OAuth discovery, registration, and token storage
   commands.ts     custom slash commands
   instructions.ts AGENTS.md loader
   compact.ts      context compaction

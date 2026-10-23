@@ -1,6 +1,8 @@
 # FITUR.md — Roadmap Parity ZelAI CLI
 
-Tujuan: **semua fitur opencode wajib tersedia di zelaicli**. File ini adalah daftar kerja, bukan dokumentasi jualan. Referensi utama: `github.com/anomalyco/opencode` branch `dev` dan docs **v2** `opencode.ai/v2/docs` (v1 `opencode.ai/docs` hanya untuk fitur yang belum dimigrasi). Audit terakhir: November 2026.
+Tujuan: **semua fitur opencode wajib tersedia di zelaicli**. File ini adalah daftar kerja, bukan dokumentasi jualan. Referensi utama: `github.com/anomalyco/opencode` branch `dev` dan docs **v2** `opencode.ai/v2/docs` (v1 `opencode.ai/docs` hanya untuk fitur yang belum dimigrasi). Audit terakhir: Oktober 2026.
+
+Status singkat: core agent/tools/TUI/sesi/config sudah terintegrasi; modul `providers`, `pricing`, `policy`, `snapshot`, `diff`, `websearch`, `service`, `pair`, `warming`, `mcp-oauth` sudah ada di `src/`, tetapi sebagian belum diekspos ke CLI/TUI/`serve` dan ditandai `[~]`.
 
 Legenda:
 
@@ -47,7 +49,7 @@ Aturan:
 - [ ] Opsi `disable: true` (v2 `disabled`)
 - [ ] `color` agent di UI
 - [ ] ID agent bersarang (`team/reviewer`) dan tampilan dalam grup
-- [ ] Opsi provider arbitrer diteruskan apa adanya (mis. `reasoningEffort`)
+- [x] Opsi provider arbitrer diteruskan apa adanya (mis. `reasoningEffort`)
 - [ ] `permission.task` dengan glob per subagent
 - [ ] Agent summary khusus (selain compaction dan title)
 - [ ] Invokasi subagent via `@nama` di TUI
@@ -114,7 +116,7 @@ Aturan:
 - [ ] Mode mini dan settings dialog
 - [ ] Navigasi session child/tab
 - [ ] TUI control API untuk klien eksternal
-- [ ] Config UI terpisah `cli.json` (global) + `OPENCODE_CLI_CONFIG_CONTENT`, reload live
+- [~] Config UI terpisah `cli.json` (global) + `ZELAI_CLI_CONFIG_CONTENT` (loader + merge sudah ada, reload live belum)
 - [x] `/details`, `/themes`, dan slash command custom
 
 ## M3 — Sesi lanjutan
@@ -125,20 +127,20 @@ Aturan:
 - [x] Auto title dari pesan pertama
 - [x] Token usage per sesi dan `stats`
 - [x] Undo/redo berbasis snapshot
-- [~] Snapshot v2: `/undo` rollback file + percakapan per turn dan mengembalikan prompt; `/redo` membatalkan undo. Belum: scope git worktree dan batas untracked ≤2MiB
+- [~] Snapshot v2: `/undo` rollback file + percakapan per turn dan mengembalikan prompt; `/redo` membatalkan undo. Snapshot worktree (`snapshot.ts`) sudah ada; belum: batas untracked ≤2MiB teruji penuh
 - [x] Compaction manual dan otomatis
 - [ ] Compaction v2: `compaction.auto`, `keep.tokens` (default 15000), pemicu manual via API, event `session.compaction.*`
 - [ ] Attachment v2: `{uri,name,description}` dengan `file:`/`data:` URL, rentang baris, 20MiB
 - [x] `zelai init` menulis `AGENTS.md`
 - [ ] Backend SQLite + migrasi (`zelai db`)
 - [~] Status sesi berjalan: `GET /sessions/status`; belum ada perintah CLI/TUI
-- [ ] Child session untuk subagent
+- [x] Child session untuk subagent
 - [~] Fork pada message tertentu: `session fork --at <n>` dan `POST /sessions/:id/fork`; TUI masih fork seluruh percakapan
 - [~] Revert/unrevert: `/revert [n]`, `/unrevert`, `session revert/unrevert`, endpoint server; per-turn, belum per pesan tunggal
-- [ ] Diff per message dan per sesi (API + TUI)
+- [ ] Diff per message dan per sesi (API + TUI); `diff.ts`/`snapshot.ts` sudah menyediakan unified diff
 - [ ] Ringkasan sesi via agent (selain compaction)
 - [x] `/export` membuka `$EDITOR`
-- [ ] Biaya per sesi/model (cost), bukan hanya token
+- [x] Biaya per sesi/model (cost), bukan hanya token
 - [ ] Filter `stats` per hari/model/project
 
 ## M4 — Ekstensibilitas
@@ -149,7 +151,7 @@ Aturan:
 - [x] Server remote (Streamable HTTP, JSON/SSE)
 - [x] `mcp add`, `mcp remove`, `mcp list`
 - [ ] Schema v2 `mcp.servers` (nested) dan `mcp add --url/--global`
-- [ ] OAuth MCP + perintah `/mcps`
+- [~] OAuth MCP + perintah `/mcps` (modul `mcp-oauth.ts` siap, belum terhubung ke `mcp.ts`/CLI)
 - [ ] `mcp auth`, `mcp logout`, `mcp debug`
 - [ ] Tambah server dinamis via API
 - [ ] Status server via API
@@ -205,14 +207,14 @@ Aturan:
 - [x] Permission per agent
 - [x] Permission `edit`, `bash` (pola), `task`, `mcp`, `read`, `glob`, `grep`, `list`, `webfetch`, `websearch`, `skill`, `external_directory`, `question`, `lsp`, `git`
 - [ ] JSON Schema `$schema` dan autocomplete editor
-- [ ] `cli.json` terpisah untuk konfigurasi UI (v2 menggantikan `tui.json`)
-- [ ] Override path config via env (`ZELAI_CONFIG`, `ZELAI_CLI_CONFIG`, `ZELAI_CLI_CONFIG_CONTENT`)
+- [~] `cli.json` terpisah untuk konfigurasi UI (loader + merge sudah ada, reload live belum)
+- [~] Override path config via env (`ZELAI_CONFIG`, `ZELAI_CLI_CONFIG`, `ZELAI_CLI_CONFIG_CONTENT`); baru `cli.json` yang punya env override
 - [ ] API `GET/PATCH /config`
 - [x] Wildcard permission untuk semua tool/custom/MCP
-- [ ] Schema permission v2 berbasis list `[{action, resource, effect}]`, last-match-wins, aksi `shell`/`subagent`/`edit`/`read`/`glob`/`grep`/`websearch`
+- [x] Schema permission v2 berbasis list `[{action, resource, effect}]`, last-match-wins, aksi `shell`/`subagent`/`edit`/`read`/`glob`/`grep`/`websearch` (dikonversi ke permission map)
 - [ ] `permission.task` glob
-- [ ] Policies tingkat organisasi (workspace Console)
-- [ ] Policy binary tanpa prompt: `provider.use`, `tool.use`, `integration.use`
+- [~] Policies tingkat organisasi (policy lokal provider/tool/integration sudah ada; belum tersinkron Console)
+- [x] Policy binary tanpa prompt: `provider.use`, `tool.use`, `integration.use`
 - [ ] Recovery `doom_loop`
 - [ ] Validasi config + pesan error terstruktur
 
@@ -223,23 +225,23 @@ Aturan:
 - [x] Katalog model dan model default
 - [x] Model global dan per agent
 - [x] `temperature`, `topP`, `steps`
-- [ ] Katalog multi-provider (models.dev)
-- [ ] Auth per provider: OAuth dan API key
+- [~] Katalog multi-provider (config `providers`, discovery lokal; belum models.dev)
+- [~] Auth per provider: API key via config/env; OAuth provider belum
 - [ ] `/connect` di TUI
-- [ ] Provider lokal (Ollama, LM Studio, dsb.)
-- [ ] Provider OpenAI-compatible custom via config
-- [ ] Format model `provider/model`
-- [ ] Varian model/reasoning effort dan cycle `ctrl+t`
-- [ ] Opsi spesifik provider diteruskan
+- [~] Provider lokal (Ollama, LM Studio): discovery ada, belum terhubung ke picker
+- [x] Provider OpenAI-compatible custom via config
+- [x] Format model `provider/model`
+- [~] Varian model/reasoning effort (`provider/model#high` sudah; cycle `ctrl+t` belum)
+- [x] Opsi spesifik provider diteruskan
 - [ ] Model kecil/cepat untuk title, summary, compaction
 - [ ] `zelai models --refresh --verbose`
-- [ ] Metadata biaya per model
+- [x] Metadata biaya per model (`pricing.ts`, cost sesi)
 - [ ] Fallback model saat provider gagal
-- [ ] Varian model `provider/model#high` (reasoning effort) dan cycle `ctrl+t`
-- [ ] Config `providers`: `env`, `package`, `canonical`, `compatibility`, `settings`, `headers`
-- [ ] Discovery provider lokal (Ollama, LM Studio, dsb.) dan `OPENCODE_DISABLE_FREE_MODELS`
-- [ ] Warming keep-alive request (`provider.warming`: prompt, interval 4m, duration 30m, default mati)
-- [ ] Websearch multi-provider: `exa`, `firecrawl`, `parallel`, `tavily`, `tinyfish`, `random` + failover 429
+- [x] Varian model `provider/model#high` (reasoning effort); cycle `ctrl+t` belum
+- [~] Config `providers`: `env`, `baseUrl`, `headers`, `options`, `models`; `package`/`canonical`/`compatibility` belum
+- [~] Discovery provider lokal (Ollama, LM Studio, dsb.) dan `ZELAI_DISABLE_FREE_MODELS`/`OPENCODE_DISABLE_FREE_MODELS` (fungsi ada, belum dipanggil CLI)
+- [~] Warming keep-alive request (`provider.warming`: prompt, interval 4m, duration 30m, default mati) — `warming.ts` ada, belum dijalankan `serve`
+- [x] Websearch multi-provider: `exa`, `firecrawl`, `parallel`, `tavily`, `tinyfish`, `random` + failover 429
 
 ## M7 — Server, API, SDK
 
@@ -253,7 +255,7 @@ Aturan:
 - [x] SDK TypeScript manual (`@zelapii/cli/sdk`)
 - [ ] SDK generated dari OpenAPI (tipe lengkap)
 - [ ] Event global SSE + event per sesi
-- [ ] Background service v2: `zelai service status/start/stop/restart` dan `service set/get/unset env|cors|disabled`
+- [ ] Background service v2: `zelai service status/start/stop/restart` dan `service set/get/unset env|cors|disabled` (`service.ts` sudah ada, CLI belum)
 - [ ] `zelai api get/post` untuk memanggil API lokal
 - [ ] `--standalone`/`--server` dan pemisahan state client-server
 - [ ] SDK embedded in-process (setara `@opencode/sdk`, in-memory router, `await using`)
@@ -281,7 +283,7 @@ Aturan:
 - [ ] Ekstensi VS Code
 - [ ] Ekstensi Zed resmi/packaging
 - [ ] Desktop app (macOS, Windows, Linux)
-- [ ] `zelai pair`: web UI loopback (port 49374/28894), password, sesi 30 hari, QR
+- [~] `zelai pair`: web UI loopback (port 49374/28894), password, sesi 30 hari, QR (`pair.ts` ada, CLI belum)
 - [ ] `zelai pair --remote` (OpenTunnel) dan mode `zelai mini`
 - [ ] Web UI
 - [ ] GitHub agent/action
@@ -327,17 +329,17 @@ Aturan:
 - [x] Server default aman (loopback, tolak bind publik tanpa password)
 - [x] Login gateway ZelAI (device flow)
 - [x] Binary tunggal tanpa Node
-- [ ] README dan FITUR.md selalu sinkron dengan fitur baru
+- [x] README dan FITUR.md selalu sinkron dengan fitur baru
 
 ## Urutan eksekusi
 
 | Batch | Isi | Milestone |
 |---|---|---|
 | 7 | `/editor`, `/export`, `/thinking`, command palette, references, permission wildcard, `tui.mouse` (**selesai, menunggu uji TUI**) | M2, M4, M5 |
-| 8 | Snapshot v2 (`/undo` file + prompt, `/redo`), revert/unrevert, fork per message, diff sesi, child session, status, cost — **sebagian: undo turn, revert/unrevert, fork `--at`, status endpoint** | M3 |
+| 8 | Snapshot v2 (`/undo` file + prompt, `/redo`), revert/unrevert, fork per message, diff sesi, child session, status, cost — **selesai: undo turn, revert/unrevert, fork `--at`, status endpoint, child session, cost; diff sesi belum** | M3 |
 | 9 | API parity, background service + `zelai api`, `--standalone`, event bus, TUI control, OpenAPI SDK, SDK embedded + client HTTP, contract test | M7 |
-| 10 | Multi-provider, OAuth, varian `#high`, provider lokal, `providers` config, warming, websearch multi-provider, model kecil, `/connect` | M6 |
-| 11 | MCP v2/OAuth, plugin v2 + plugin TUI, skills compat, schema config/permission list, policies | M4, M5 |
+| 10 | Multi-provider, OAuth, varian `#high`, provider lokal, `providers` config, warming, websearch multi-provider, model kecil, `/connect` — **selesai: routing `provider/model`, varian `#high`, config provider, pricing, websearch failover; OAuth/warming/`/connect` belum** | M6 |
+| 11 | MCP v2/OAuth, plugin v2 + plugin TUI, skills compat, schema config/permission list, policies — **selesai: permission list, policies lokal; MCP OAuth/plugin v2 belum** | M4, M5 |
 | 12 | TUI v2: `cli.json`, leader/tab/shell mode/`@file#line`/`/btw`/`/highlights`/mini/settings, diff style, cursor, image, attention | M2 |
 | 13 | `zelai pair` + web UI, desktop, mini web, VS Code/Zed, GitHub/GitLab, PR | M8 |
 | 14 | npm publish, install script, brew/AUR/mise/nix/docker, Windows/WSL, upgrade/uninstall, migrasi v1→v2 | M9 |
