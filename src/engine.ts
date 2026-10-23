@@ -1,12 +1,14 @@
 import { chat, type ChatMessage, type ToolCall } from "./api"
 import { AGENTS, agentContext, findAgent, type Agent } from "./agents"
 import { executeTool, toolDefinitions, type Approve } from "./tools"
-import { createSession, visibleMessages, type Session, type Todo } from "./session"
+import { addCost, createChildSession, ensureMessageIds, saveSession, visibleMessages, type Session, type Todo } from "./session"
 import type { McpManager } from "./mcp"
 import { mergePermission } from "./permissions"
 import { skillSummary, type Skill } from "./skills"
 import type { PluginManager } from "./plugins"
 import type { LspManager } from "./lsp"
+import { isProviderAllowed, isToolAllowed, type PolicySet } from "./policy"
+import type { ModelPrice } from "./pricing"
 
 export type EngineEvent =
   | { type: "text"; text: string }
@@ -44,6 +46,12 @@ export interface RunTurnOptions {
   askQuestion?: (request: QuestionRequest) => Promise<string>
   plugins?: PluginManager
   lsp?: LspManager
+  provider?: string
+  providerHeaders?: Record<string, string>
+  providerOptions?: Record<string, unknown>
+  policies?: PolicySet
+  pricing?: Record<string, ModelPrice | { input: number; output: number }>
+  websearch?: { provider?: string; apiKeys?: Record<string, string> }
 }
 
 export interface QuestionRequest {
@@ -71,6 +79,14 @@ function parseArguments(raw: string) {
 export async function runTurn(options: RunTurnOptions) {
   const maxSteps = options.agent.steps ?? options.maxSteps ?? 16
   const permission = mergePermission(options.permission, options.agent.permission)
+  const ids = ensureMessageIds(options.session)
+  const userIndex = options.session.messages.findLastIndex((message) => message.role === "user")
+  const messageId = userIndex >= 0 ? ids[userIndex] : undefined
+  if (options.policies && !isProviderAllowed(options.policies, options.provider || options.model.split("/")[0], options.model)) {
+    const message = `Provider is blocked by policy: ${options.provider || options.model}`
+    options.onEvent({ type: "error", message })
+    throw new Error(message)
+  }
   const system = agentContext(
     options.agent,
     options.cwd,
@@ -84,8 +100,10 @@ export async function runTurn(options: RunTurnOptions) {
       : options.runSubagent ||
         (async (agentId: string, prompt: string) => {
           const sub = findAgent(agentId, options.agents || AGENTS)
-          const nested = createSession(sub.id, options.model)
+          const nested = createChildSession(options.session, sub.id, sub.model || options.model)
           nested.messages.push({ role: "user", content: prompt })
+          ensureMessageIds(nested)
+          await saveSession(nested)
           let final = ""
           await runTurn({
             ...options,
@@ -97,16 +115,19 @@ export async function runTurn(options: RunTurnOptions) {
             onEvent: (event) => {
               if (event.type === "text") final += event.text
             },
-            onPersist: undefined,
+            onPersist: () => saveSession(nested),
           })
           return final || "(subagent returned no text)"
         })
-  const tools = toolDefinitions(
+  const definitions = toolDefinitions(
     options.agent,
     options.mcp?.toolDefinitions() || [],
     options.plugins?.toolDefinitions() || [],
     { lsp: Boolean(options.lsp) },
   )
+  const tools = options.policies
+    ? definitions.filter((definition) => isToolAllowed(options.policies!, definition.function.name))
+    : definitions
   await options.plugins?.event("session.start", { sessionId: options.session.id, agent: options.agent.id })
 
   for (let step = 1; step <= maxSteps; step += 1) {
@@ -123,6 +144,8 @@ export async function runTurn(options: RunTurnOptions) {
       messages: toApiMessages(system, visibleMessages(options.session)),
       tools,
       signal: options.signal,
+      headers: options.providerHeaders,
+      extra: options.providerOptions,
       onText: (text) => options.onEvent({ type: "text", text }),
       onReasoning: (text) => options.onEvent({ type: "reasoning", text }),
     })
@@ -141,6 +164,7 @@ export async function runTurn(options: RunTurnOptions) {
         prompt: (options.session.tokens?.prompt || 0) + prompt,
         completion: (options.session.tokens?.completion || 0) + completion,
       }
+      addCost(options.session, options.model, { prompt, completion }, options.pricing)
       options.onEvent({
         type: "usage",
         prompt: result.usage.prompt_tokens || 0,
@@ -201,6 +225,9 @@ export async function runTurn(options: RunTurnOptions) {
           lsp: options.lsp,
           plugins: options.plugins,
           agent: options.agent.id,
+          messageId,
+          policies: options.policies,
+          websearch: options.websearch,
         })
       }
       const toolMessage: ChatMessage = {

@@ -1,5 +1,8 @@
 import { runTurn } from "./engine"
 import type { Agent } from "./agents"
+import { loadPolicies } from "./policy"
+import { chatRoute } from "./modelroute"
+import type { ModelPrice } from "./pricing"
 import type { Config } from "./config"
 import type { Session } from "./session"
 import { commitRevert, saveSession } from "./session"
@@ -27,6 +30,42 @@ export interface RunOptions {
   lsp?: LspManager
 }
 
+export interface RouteOptions {
+  baseUrl: string
+  apiKey: string
+  model: string
+  provider?: string
+  providerHeaders?: Record<string, string>
+  providerOptions?: Record<string, unknown>
+  policies?: Awaited<ReturnType<typeof loadPolicies>>
+  pricing?: Record<string, ModelPrice | { input: number; output: number }>
+  websearch?: { provider?: string; apiKeys?: Record<string, string> }
+}
+
+export async function routeFor(config: Config, model: string): Promise<RouteOptions> {
+  const route = await chatRoute(config, model)
+  const policies = await loadPolicies({ config: config.policies })
+  const websearch = config.websearch || {}
+  const pricing: Record<string, ModelPrice | { input: number; output: number }> = {}
+  for (const [name, provider] of Object.entries(config.providers || {})) {
+    for (const entry of Object.values(provider.models || {})) {
+      if (!entry.id || !entry.pricing) continue
+      pricing[`${name}/${entry.id}`] = entry.pricing
+    }
+  }
+  return {
+    baseUrl: route.baseUrl,
+    apiKey: route.apiKey,
+    model: route.model,
+    provider: route.provider,
+    providerHeaders: route.headers,
+    providerOptions: route.extra,
+    policies,
+    pricing,
+    websearch: { provider: websearch.provider, apiKeys: websearch.apiKeys },
+  }
+}
+
 export async function runOnce(options: RunOptions) {
   const { config, session, agent, model, message } = options
   session.agent = agent.id
@@ -51,12 +90,19 @@ export async function runOnce(options: RunOptions) {
   }
 
   try {
+    const route = await routeFor(config, model)
     await runTurn({
       session,
       agent,
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey!,
-      model,
+      baseUrl: route.baseUrl,
+      apiKey: route.apiKey,
+      model: route.model,
+      provider: route.provider,
+      providerHeaders: route.providerHeaders,
+      providerOptions: route.providerOptions,
+      policies: route.policies,
+      pricing: route.pricing,
+      websearch: route.websearch,
       cwd: options.cwd,
       approve,
       autoApprove: options.yolo,

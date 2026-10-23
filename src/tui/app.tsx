@@ -32,6 +32,7 @@ import { expandCommand } from "../commands"
 import { compactSession, shouldCompact } from "../compact"
 import { recordTurnStart, redoLastTurn, undoLastTurn } from "../undo"
 import { runTurn, type EngineEvent, type QuestionRequest } from "../engine"
+import { routeFor } from "../run"
 import type { ApprovalRequest } from "../tools"
 import { dataDir, VERSION } from "../paths"
 import type { Skill } from "../skills"
@@ -401,12 +402,19 @@ export function App(props: AppProps) {
     }
     controller = new AbortController()
     try {
+      const route = await routeFor(props.config, activeModel)
       await runTurn({
         session: activeSession,
         agent: currentAgent,
-        baseUrl: props.config.baseUrl,
-        apiKey: props.config.apiKey,
-        model: activeModel,
+        baseUrl: route.baseUrl,
+        apiKey: route.apiKey,
+        model: route.model,
+        provider: route.provider,
+        providerHeaders: route.providerHeaders,
+        providerOptions: route.providerOptions,
+        policies: route.policies,
+        pricing: route.pricing,
+        websearch: route.websearch,
         cwd: props.cwd,
         approve: requestApproval,
         permission: props.config.permission,

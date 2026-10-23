@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto"
 import { loadAgents, findAgent } from "./agents"
 import { apiKey, type Config } from "./config"
 import { runTurn, type EngineEvent } from "./engine"
+import { routeFor } from "./run"
 import { loadInstructions } from "./instructions"
 import { createMcpManager, type McpManager } from "./mcp"
 import { defaultModel, models } from "./models"
@@ -497,12 +498,19 @@ export async function startServer(config: Config, options: ServerOptions = {}) {
                 await recordTurnStart(session.id)
                 session.messages.push({ role: "user", content: message })
                 await saveSession(session)
+                const route = await routeFor(config, model)
                 await runTurn({
                   session,
                   agent,
-                  baseUrl: config.baseUrl,
-                  apiKey: apiKey(config)!,
-                  model,
+                  baseUrl: route.baseUrl,
+                  apiKey: route.apiKey,
+                  model: route.model,
+                  provider: route.provider,
+                  providerHeaders: route.providerHeaders,
+                  providerOptions: route.providerOptions,
+                  policies: route.policies,
+                  pricing: route.pricing,
+                  websearch: route.websearch,
                   cwd,
                   instructions: await loadInstructions(cwd, config),
                   permission: config.permission,

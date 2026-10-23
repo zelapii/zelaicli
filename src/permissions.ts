@@ -20,6 +20,58 @@ export interface PermissionConfig {
   [pattern: string]: PermissionDecision | Record<string, PermissionDecision> | undefined
 }
 
+export interface PermissionRule {
+  action: string
+  resource: string
+  effect: PermissionDecision
+}
+
+const RULE_KINDS: Record<string, string> = {
+  shell: "bash",
+  bash: "bash",
+  subagent: "task",
+  task: "task",
+  write: "edit",
+  edit: "edit",
+  read: "read",
+  glob: "glob",
+  grep: "grep",
+  list: "list",
+  webfetch: "webfetch",
+  websearch: "websearch",
+  skill: "skill",
+  question: "question",
+  lsp: "lsp",
+  git: "git",
+  mcp: "mcp",
+  custom: "custom",
+  external_directory: "external_directory",
+}
+
+export function permissionConfigFromRules(
+  base: PermissionConfig | undefined,
+  rules: PermissionRule[] | undefined,
+): PermissionConfig {
+  const config: PermissionConfig = { ...(base || {}) }
+  for (const rule of rules || []) {
+    if (!rule || !rule.action || !rule.resource || !rule.effect) continue
+    const kind = RULE_KINDS[rule.action] || rule.action
+    if (kind === "bash") {
+      const current = config.bash
+      const map = current && typeof current === "object" ? { ...current } : {}
+      map[rule.resource] = rule.effect
+      config.bash = map
+      continue
+    }
+    if (rule.resource === "*" || rule.resource === rule.action) {
+      config[kind] = rule.effect
+      continue
+    }
+    config[rule.resource] = rule.effect
+  }
+  return config
+}
+
 export type PermissionKind =
   | "write"
   | "edit"

@@ -36,6 +36,8 @@ export interface ChatOptions {
   onReasoning?: (delta: string) => void
   temperature?: number
   top_p?: number
+  headers?: Record<string, string>
+  extra?: Record<string, unknown>
 }
 
 export interface ChatResult {
@@ -101,8 +103,10 @@ async function request(options: ChatOptions, includeTools: boolean) {
     "content-type": "application/json",
     accept: "text/event-stream",
     authorization: `Bearer ${options.apiKey}`,
+    ...(options.headers || {}),
   }
   const body: Record<string, unknown> = {
+    ...(options.extra || {}),
     model: options.model,
     messages: options.messages,
     stream: true,

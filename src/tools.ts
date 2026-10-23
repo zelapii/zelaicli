@@ -11,6 +11,8 @@ import { runFormatter } from "./formatters"
 import { GIT_TOOLS, gitCommit, gitDiff, gitLog, gitStatus } from "./git"
 import { LSP_TOOLS, type LspManager } from "./lsp"
 import type { PluginManager } from "./plugins"
+import { isIntegrationAllowed, isToolAllowed, type PolicySet } from "./policy"
+import { providerFromEnv, providerOrder, searchWithFailover, type WebsearchProvider } from "./websearch"
 
 export interface ApprovalRequest {
   kind:
@@ -51,6 +53,9 @@ export interface ToolContext {
   lsp?: LspManager
   plugins?: PluginManager
   agent?: string
+  messageId?: string
+  policies?: PolicySet
+  websearch?: { provider?: string; apiKeys?: Record<string, string> }
   onTodos?: (todos: Todo[]) => void
 }
 
@@ -421,7 +426,7 @@ async function write(context: ToolContext, args: any): Promise<ToolResult> {
   await fs.mkdir(path.dirname(file), { recursive: true })
   await fs.writeFile(file, content)
   const formatError = await runFormatter(file, context.formatter, context.cwd)
-  await recordSnapshot(context.sessionId, file, before)
+  await recordSnapshot(context.sessionId, file, before, content, context.messageId)
   const diagnostics = await lspNote(context, file)
   return { ok: true, output: `Wrote ${file} (${content.length} characters)${formatError ? `\n${formatError}` : ""}${diagnostics}` }
 }
@@ -447,7 +452,7 @@ async function edit(context: ToolContext, args: any): Promise<ToolResult> {
   const next = args.replace_all ? content.split(oldString).join(newString) : content.replace(oldString, newString)
   await fs.writeFile(file, next)
   const formatError = await runFormatter(file, context.formatter, context.cwd)
-  await recordSnapshot(context.sessionId, file, content)
+  await recordSnapshot(context.sessionId, file, content, next, context.messageId)
   const diagnostics = await lspNote(context, file)
   const preview = [
     ...oldString.split("\n").slice(0, 6).map((line) => `- ${line}`),
@@ -619,6 +624,25 @@ async function websearch(context: ToolContext, args: any): Promise<ToolResult> {
     return { ok: false, output: "Denied by the user." }
   }
   const limit = Math.min(15, Math.max(1, Number(args.num) || 8))
+  const keys = { ...(context.websearch?.apiKeys || {}), ...providerFromEnv(process.env) }
+  const order = providerOrder(
+    (context.websearch?.provider as WebsearchProvider | undefined) || undefined,
+    keys,
+  )
+  if (order.length) {
+    try {
+      const { provider, results } = await searchWithFailover(order, query, keys, {
+        signal: AbortSignal.timeout(30_000),
+      })
+      if (!results.length) return { ok: false, output: `No search results found (${provider}).` }
+      return {
+        ok: true,
+        output: results.map((result, index) => `${index + 1}. [${result.title}](${result.url})\n${result.snippet}`).join("\n\n"),
+      }
+    } catch (error) {
+      return { ok: false, output: `Search failed: ${error instanceof Error ? error.message : error}` }
+    }
+  }
   const response = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
     headers: { "user-agent": "Mozilla/5.0 (compatible; ZelAI/0.1)", accept: "text/html" },
     signal: AbortSignal.timeout(30_000),
@@ -684,7 +708,10 @@ async function applyPatch(context: ToolContext, args: any): Promise<ToolResult> 
   if (code !== 0) {
     return { ok: false, output: truncate(`git apply failed (exit ${code})\n${stderr || stdout}`.trim()) }
   }
-  for (const [file, content] of before) await recordSnapshot(context.sessionId, file, content)
+  for (const [file, content] of before) {
+    const after = await fs.readFile(file, "utf8").catch(() => null)
+    await recordSnapshot(context.sessionId, file, content, after, context.messageId)
+  }
   const notes: string[] = []
   for (const file of files.keys()) {
     const note = await lspNote(context, file)
@@ -809,6 +836,17 @@ export async function executeTool(name: string, rawArgs: string, context: ToolCo
     args = rawArgs.trim() ? JSON.parse(rawArgs) : {}
   } catch {
     return { ok: false, output: `Invalid JSON arguments for ${name}: ${rawArgs.slice(0, 200)}` }
+  }
+  if (context.policies) {
+    if (!isToolAllowed(context.policies, name)) {
+      return { ok: false, output: `Blocked by policy: tool ${name} is not allowed.` }
+    }
+    if (name.startsWith("mcp__")) {
+      const server = name.split("__")[1] || ""
+      if (server && !isIntegrationAllowed(context.policies, server)) {
+        return { ok: false, output: `Blocked by policy: integration ${server} is not allowed.` }
+      }
+    }
   }
   try {
     if (context.plugins) args = await context.plugins.before(name, args)

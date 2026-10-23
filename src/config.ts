@@ -1,9 +1,11 @@
 import fs from "node:fs/promises"
 import path from "node:path"
-import { accountPath, configPath } from "./paths"
+import { accountPath, configDir, configPath } from "./paths"
 import type { KeybindConfig } from "./keybinds"
 import type { ThemeConfig } from "./theme"
 import type { LspConfig } from "./lsp"
+import type { ProviderConfig } from "./providers"
+import { permissionConfigFromRules, type PermissionRule } from "./permissions"
 
 export interface ServerConfig {
   host?: string
@@ -19,6 +21,26 @@ export interface TuiConfig {
     style?: "block" | "line" | "underline" | "default"
     blinking?: boolean
   }
+  scrollSpeed?: number
+  scrollAcceleration?: number
+  leader?: string
+  sounds?: boolean
+  notifications?: boolean
+  mini?: boolean
+}
+
+export interface CliConfig {
+  theme?: string | ThemeConfig
+  cursor?: TuiConfig["cursor"]
+  keybinds?: KeybindConfig
+  leader?: string
+  animations?: boolean
+  diffStyle?: "auto" | "stacked"
+  mouse?: boolean
+  scrollSpeed?: number
+  scrollAcceleration?: number
+  sounds?: boolean
+  notifications?: boolean
 }
 
 export interface Config {
@@ -28,6 +50,7 @@ export interface Config {
   model?: string
   agent?: string
   permission?: import("./permissions").PermissionConfig
+  permissions?: PermissionRule[]
   instructions?: string[]
   mcp?: Record<string, import("./mcp").McpServerConfig>
   formatter?: Record<string, string>
@@ -37,7 +60,14 @@ export interface Config {
   plugins?: string[]
   server?: ServerConfig
   tui?: TuiConfig
+  cli?: CliConfig
   references?: Record<string, string>
+  providers?: Record<string, ProviderConfig>
+  websearch?: { provider?: string; apiKeys?: Record<string, string> }
+  warming?: { enabled?: boolean; interval?: number; duration?: number; model?: string }
+  policies?: unknown
+  experimental?: { policies?: unknown }
+  compaction?: { auto?: boolean; keepTokens?: number }
 }
 
 export interface Account {
@@ -120,17 +150,51 @@ export async function writePrivateJson(file: string, value: unknown) {
   await fs.chmod(file, 0o600).catch(() => {})
 }
 
+async function loadCliConfig(): Promise<CliConfig | undefined> {
+  const inline = process.env.ZELAI_CLI_CONFIG_CONTENT || process.env.OPENCODE_CLI_CONFIG_CONTENT
+  if (inline) {
+    try {
+      return parseJsonc<CliConfig>(inline)
+    } catch {
+      return undefined
+    }
+  }
+  const file = process.env.ZELAI_CLI_CONFIG || process.env.OPENCODE_CLI_CONFIG || path.join(configDir(), "cli.json")
+  return readJson<CliConfig>(file)
+}
+
+function applyCliConfig(config: Config, cli: CliConfig | undefined) {
+  if (!cli) return
+  config.cli = cli
+  if (config.theme === undefined && cli.theme !== undefined) config.theme = cli.theme
+  const tui: TuiConfig = {
+    ...(config.tui || {}),
+    cursor: { ...(cli.cursor || {}), ...(config.tui?.cursor || {}) },
+  }
+  if (tui.leader === undefined) tui.leader = cli.leader
+  if (tui.diffStyle === undefined) tui.diffStyle = cli.diffStyle
+  if (tui.mouse === undefined) tui.mouse = cli.mouse
+  if (tui.scrollSpeed === undefined) tui.scrollSpeed = cli.scrollSpeed
+  if (tui.scrollAcceleration === undefined) tui.scrollAcceleration = cli.scrollAcceleration
+  if (tui.sounds === undefined) tui.sounds = cli.sounds
+  if (tui.notifications === undefined) tui.notifications = cli.notifications
+  config.tui = tui
+  config.keybinds = { ...(cli.keybinds || {}), ...(config.keybinds || {}) }
+}
+
 export async function loadConfig(): Promise<Config> {
   const stored = await readJson<Config>(configPath())
   const config: Config = {
     ...defaultConfig(),
     ...stored,
   }
+  applyCliConfig(config, await loadCliConfig())
   const legacy = (stored as any)?.providers?.zelai?.settings
   if (!config.apiKey && legacy?.apiKey) config.apiKey = legacy.apiKey
   if (!(stored as any)?.baseUrl && legacy?.baseURL) config.baseUrl = normalizeBaseUrl(String(legacy.baseURL).replace(/\/v1$/, ""))
   if (process.env.ZELAI_BASE_URL) config.baseUrl = normalizeBaseUrl(process.env.ZELAI_BASE_URL)
   if (!config.apiKey && process.env.ZELAI_API_KEY) config.apiKey = process.env.ZELAI_API_KEY
+  if (config.permissions?.length) config.permission = permissionConfigFromRules(config.permission, config.permissions)
   return config
 }
 
@@ -168,7 +232,7 @@ function mergeLsp(base: Config["lsp"], project: Config["lsp"]): Config["lsp"] {
 }
 
 export function mergeConfig(base: Config, project: Partial<Config>): Config {
-  return {
+  const merged: Config = {
     ...base,
     ...project,
     version: 1,
@@ -177,6 +241,7 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
       ...(base.permission || {}),
       ...(project.permission || {}),
     },
+    permissions: [...(base.permissions || []), ...(project.permissions || [])],
     instructions: [...(base.instructions || []), ...(project.instructions || [])],
     mcp: { ...(base.mcp || {}), ...(project.mcp || {}) },
     formatter: { ...(base.formatter || {}), ...(project.formatter || {}) },
@@ -186,7 +251,16 @@ export function mergeConfig(base: Config, project: Partial<Config>): Config {
     plugins: [...new Set([...(base.plugins || []), ...(project.plugins || [])])],
     server: { ...(base.server || {}), ...(project.server || {}) },
     tui: { ...(base.tui || {}), ...(project.tui || {}), cursor: { ...(base.tui?.cursor || {}), ...(project.tui?.cursor || {}) } },
+    cli: { ...(base.cli || {}), ...(project.cli || {}) },
     references: { ...(base.references || {}), ...(project.references || {}) },
+    providers: { ...(base.providers || {}), ...(project.providers || {}) },
+    websearch: { ...(base.websearch || {}), ...(project.websearch || {}) },
+    warming: { ...(base.warming || {}), ...(project.warming || {}) },
+    policies: project.policies ?? base.policies,
+    experimental: { ...(base.experimental || {}), ...(project.experimental || {}) },
+    compaction: { ...(base.compaction || {}), ...(project.compaction || {}) },
     apiKey: base.apiKey,
   }
+  if (merged.permissions?.length) merged.permission = permissionConfigFromRules(merged.permission, merged.permissions)
+  return merged
 }
